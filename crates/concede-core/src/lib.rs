@@ -6,18 +6,25 @@
 //! The decision log (ADR 0005) is a directory of immutable JSON records:
 //! [`Decision`]s explain changes, [`Event`]s record reviews and commit links, and
 //! [`Capture`]s are raw changes seen by editor hooks (ADR 0007). [`Store`] reads and
-//! writes them; [`Log`] answers questions about them.
+//! writes them; [`Log`] answers questions about them. Version control is reached
+//! through a [`ChangeStore`] (ADR 0006).
 
+pub mod change_store;
 pub mod error;
+pub mod git;
 pub mod id;
+pub mod linemap;
 pub mod log;
 pub mod model;
 pub mod schema;
 pub mod store;
 mod validate;
 
+pub use change_store::ChangeStore;
 pub use error::{Error, Result, ValidationError};
+pub use git::GitCli;
 pub use id::{CaptureId, DecisionId, EventId};
+pub use linemap::{MappedRange, Mapping};
 pub use log::{CaptureHit, DecisionHit, DecisionState, Inbox, Log, SessionGroup};
 pub use model::{
     AgentInfo, Alternative, BlobId, Capture, Change, CommitId, Decision, Event, EventKind, Hunk,

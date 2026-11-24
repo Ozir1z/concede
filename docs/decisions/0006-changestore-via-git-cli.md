@@ -89,3 +89,11 @@ acceptable for Phase 1. If it turns out to be a problem, we can keep blobs alive
 - Each query spawns a few processes (a few milliseconds each). Fine for the CLI. The app will
   cache results.
 - Tests create real temporary git repos (`tempfile`) rather than mocking git.
+
+## Implementation note (2026-11-24)
+
+The trait ended up as small primitives (`snapshot`, `blob_at`, `blob_exists`,
+`diff_blobs`, `user_name` alongside `root`, `head` and `commit_exists`), with the two
+higher-level methods above (`changed_hunks`, `diff_blob_to_worktree`) provided as default
+methods built on them. A second engine then only implements the primitives. The decision
+itself is unchanged.

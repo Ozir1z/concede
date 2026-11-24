@@ -37,6 +37,42 @@ pub enum Error {
     /// A record with this id already exists. Records are never overwritten.
     #[error("{} already exists; records are never overwritten", path.display())]
     AlreadyExists { path: PathBuf },
+
+    /// The `git` executable could not be found on PATH.
+    #[error("git was not found on PATH; Concede needs git to be installed")]
+    GitNotFound,
+
+    /// A git command failed.
+    #[error("`{command}` failed: {stderr}")]
+    Git { command: String, stderr: String },
+
+    /// The directory is not inside a git work tree.
+    #[error("{} is not inside a git repository", path.display())]
+    NotARepository { path: PathBuf },
+
+    /// A file path points outside the repository.
+    #[error("{} is outside the repository", path.display())]
+    OutsideRepository { path: PathBuf },
+
+    /// The operation needs a commit, but the repository has none yet.
+    #[error("the repository has no commits yet")]
+    NoCommits,
+
+    /// No decision or capture matches the given id.
+    #[error("no decision or capture matches {0:?}")]
+    NotFound(String),
+
+    /// An id prefix matches more than one record.
+    #[error("{prefix:?} matches {count} records; use more characters of the id")]
+    Ambiguous { prefix: String, count: usize },
+
+    /// A capture is already explained by a decision, so it can't be claimed or reviewed
+    /// on its own.
+    #[error("capture {capture} is already explained by decision {decision}")]
+    CaptureExplained {
+        capture: crate::id::CaptureId,
+        decision: crate::id::DecisionId,
+    },
 }
 
 /// Convenience alias used throughout the crate.
