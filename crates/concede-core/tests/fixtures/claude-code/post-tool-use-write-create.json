@@ -1,0 +1,26 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "transcript_path": "/home/user/.claude/projects/-repo/00000000-0000-4000-8000-000000000001.jsonl",
+  "cwd": "/repo",
+  "prompt_id": "5d356c8b-a661-48e4-9bb5-d3dcfec69e4a",
+  "permission_mode": "acceptEdits",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/repo/hello.txt",
+    "content": "hi\nthere\n"
+  },
+  "tool_response": {
+    "type": "create",
+    "filePath": "/repo/hello.txt",
+    "content": "hi\nthere\n",
+    "structuredPatch": [],
+    "originalFile": null,
+    "userModified": false
+  },
+  "tool_use_id": "toolu_01WYHYVvovzwuBUE5fMHLBYf",
+  "duration_ms": 2
+}

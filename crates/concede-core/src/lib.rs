@@ -13,6 +13,7 @@ pub mod change_store;
 mod concede;
 pub mod error;
 pub mod git;
+pub mod hooks;
 pub mod id;
 pub mod linemap;
 pub mod log;

@@ -24,6 +24,7 @@ pub const DATA_DIR: &str = ".concede";
 const DECISIONS: &str = "decisions";
 const EVENTS: &str = "events";
 const CAPTURES: &str = "captures";
+const CAPTURE_ERRORS: &str = "capture-errors.log";
 
 /// The on-disk decision log of one repository.
 #[derive(Debug, Clone)]
@@ -106,6 +107,36 @@ impl Store {
             log: Log::new(decisions, events, captures),
             warnings,
         })
+    }
+
+    /// Append a line to `.concede/capture-errors.log`, which is kept out of git by a
+    /// `.concede/.gitignore` created on first use. Hooks must never fail the agent, so
+    /// capture problems land here instead (ADR 0007).
+    pub fn log_capture_error(&self, message: &str) -> Result<PathBuf> {
+        let io = |path: &Path| {
+            let path = path.to_path_buf();
+            move |source| Error::Io { path, source }
+        };
+        fs::create_dir_all(&self.dir).map_err(io(&self.dir))?;
+
+        let ignore = self.dir.join(".gitignore");
+        if !ignore.exists() {
+            fs::write(&ignore, format!("{CAPTURE_ERRORS}\n")).map_err(io(&ignore))?;
+        }
+
+        let path = self.dir.join(CAPTURE_ERRORS);
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(io(&path))?;
+        let line = format!(
+            "{} {}\n",
+            chrono::Utc::now().to_rfc3339(),
+            message.replace('\n', " ")
+        );
+        file.write_all(line.as_bytes()).map_err(io(&path))?;
+        Ok(path)
     }
 
     fn write_record<T: Serialize>(&self, kind: &str, id: &str, record: &T) -> Result<PathBuf> {
@@ -273,6 +304,21 @@ mod tests {
             }],
         }];
         d
+    }
+
+    #[test]
+    fn capture_errors_are_appended_and_git_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::for_repo(tmp.path());
+        store.log_capture_error("first\nproblem").unwrap();
+        let path = store.log_capture_error("second").unwrap();
+        let log = std::fs::read_to_string(path).unwrap();
+        assert_eq!(log.lines().count(), 2);
+        assert!(log.lines().next().unwrap().ends_with("first problem"));
+        let ignore = std::fs::read_to_string(store.dir().join(".gitignore")).unwrap();
+        assert_eq!(ignore, "capture-errors.log\n");
+        // The log file is not a record and must not disturb loading.
+        assert!(store.load().unwrap().warnings.is_empty());
     }
 
     #[test]
