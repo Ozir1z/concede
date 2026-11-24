@@ -2,6 +2,22 @@
 //!
 //! All domain logic (decision log, rules, criticality, change store) lives here.
 //! The CLI and the app are thin layers on top of this crate.
+//!
+//! The decision log (ADR 0005) is a directory of immutable JSON records:
+//! [`Decision`]s explain changes, [`Event`]s record reviews and commit links, and
+//! [`Capture`]s are raw changes seen by editor hooks (ADR 0007).
+
+pub mod error;
+pub mod id;
+pub mod model;
+mod validate;
+
+pub use error::{Error, Result, ValidationError};
+pub use id::{CaptureId, DecisionId, EventId};
+pub use model::{
+    AgentInfo, Alternative, BlobId, Capture, Change, CommitId, Decision, Event, EventKind, Hunk,
+    LineRange, RepoPath, ReviewStatus, SCHEMA_VERSION, Source,
+};
 
 /// The product name shown in the UI and CLI.
 pub const PRODUCT_NAME: &str = "Concede";
