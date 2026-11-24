@@ -159,6 +159,11 @@ impl Log {
             .collect()
     }
 
+    /// The decision that claims a capture, if any.
+    pub fn claimed_by(&self, capture: &CaptureId) -> Option<&Decision> {
+        self.decisions().find(|d| d.captures.contains(capture))
+    }
+
     /// Captures no decision claims, oldest first.
     pub fn unclaimed_captures(&self) -> Vec<&Capture> {
         let claimed = self.claimed_captures();
