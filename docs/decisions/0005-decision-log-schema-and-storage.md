@@ -1,6 +1,6 @@
 # 0005. Decision log schema and storage
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-24
 
 ## Context

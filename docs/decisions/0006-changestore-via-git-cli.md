@@ -1,6 +1,6 @@
 # 0006. ChangeStore trait, implemented with the git CLI
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-24
 
 ## Context
