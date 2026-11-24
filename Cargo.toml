@@ -6,6 +6,7 @@ members = ["crates/concede-core", "crates/concede-cli", "crates/concede-app"]
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+repository = "https://github.com/Ozir1z/concede"
 publish = false
 
 [workspace.dependencies]
