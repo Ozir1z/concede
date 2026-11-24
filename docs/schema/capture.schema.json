@@ -1,0 +1,159 @@
+{
+  "$defs": {
+    "AgentInfo": {
+      "description": "The agent (tool, model, session) behind a record.",
+      "properties": {
+        "model": {
+          "description": "The model id, when the source knows it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session": {
+          "description": "The agent session id, used to group work and to match captures.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "description": "The agent tool, e.g. `claude-code`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool"
+      ],
+      "type": "object"
+    },
+    "BlobId": {
+      "description": "Full git object id (SHA-1 or SHA-256), lowercase hex.",
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "CaptureId": {
+      "description": "ULID: 26 Crockford base32 characters, time-ordered.",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "Change": {
+      "description": "The changes a record made to one file.",
+      "properties": {
+        "after_blob": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BlobId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Blob of the file right after the change; absent when the change deleted the file."
+        },
+        "hunks": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Hunk"
+          },
+          "type": "array"
+        },
+        "path": {
+          "$ref": "#/$defs/RepoPath"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "CommitId": {
+      "description": "Full git object id (SHA-1 or SHA-256), lowercase hex.",
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "Hunk": {
+      "description": "One changed region of a file, with unified-diff (`git diff -U0`) semantics.\n\n`old_*` refers to the file before the change, `new_*` to the file after it. Lines are\n1-based. A pure insertion has `old_lines == 0` and `old_start` is the line it was\ninserted after; a pure deletion has `new_lines == 0` and `new_start` is the line after\nwhich the removed lines used to be. Either start may be `0` for a change at the very\ntop of the file.",
+      "properties": {
+        "new_lines": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "new_start": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "old_lines": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "old_start": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "old_start",
+        "old_lines",
+        "new_start",
+        "new_lines"
+      ],
+      "type": "object"
+    },
+    "RepoPath": {
+      "description": "Path relative to the repository root, '/' separated, no '..' segments.",
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A raw change observed by an editor hook, with no reasoning (ADR 0007).",
+  "properties": {
+    "agent": {
+      "$ref": "#/$defs/AgentInfo"
+    },
+    "base_commit": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CommitId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "change": {
+      "$ref": "#/$defs/Change"
+    },
+    "id": {
+      "$ref": "#/$defs/CaptureId"
+    },
+    "schema": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "tool_name": {
+      "description": "The editor tool that made the change, e.g. `Edit` or `Write`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "id",
+    "timestamp",
+    "agent",
+    "tool_name",
+    "change"
+  ],
+  "title": "Capture",
+  "type": "object"
+}

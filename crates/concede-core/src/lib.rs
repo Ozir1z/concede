@@ -5,19 +5,25 @@
 //!
 //! The decision log (ADR 0005) is a directory of immutable JSON records:
 //! [`Decision`]s explain changes, [`Event`]s record reviews and commit links, and
-//! [`Capture`]s are raw changes seen by editor hooks (ADR 0007).
+//! [`Capture`]s are raw changes seen by editor hooks (ADR 0007). [`Store`] reads and
+//! writes them; [`Log`] answers questions about them.
 
 pub mod error;
 pub mod id;
+pub mod log;
 pub mod model;
+pub mod schema;
+pub mod store;
 mod validate;
 
 pub use error::{Error, Result, ValidationError};
 pub use id::{CaptureId, DecisionId, EventId};
+pub use log::{CaptureHit, DecisionHit, DecisionState, Inbox, Log, SessionGroup};
 pub use model::{
     AgentInfo, Alternative, BlobId, Capture, Change, CommitId, Decision, Event, EventKind, Hunk,
     LineRange, RepoPath, ReviewStatus, SCHEMA_VERSION, Source,
 };
+pub use store::{LoadWarning, Loaded, Store};
 
 /// The product name shown in the UI and CLI.
 pub const PRODUCT_NAME: &str = "Concede";

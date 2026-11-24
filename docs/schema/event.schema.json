@@ -1,0 +1,102 @@
+{
+  "$defs": {
+    "CommitId": {
+      "description": "Full git object id (SHA-1 or SHA-256), lowercase hex.",
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "type": "string"
+    },
+    "DecisionId": {
+      "description": "ULID: 26 Crockford base32 characters, time-ordered.",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "EventId": {
+      "description": "ULID: 26 Crockford base32 characters, time-ordered.",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "ReviewStatus": {
+      "description": "The review status of a decision.",
+      "enum": [
+        "unreviewed",
+        "approved",
+        "rejected"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A state change for a decision (ADR 0005). Immutable once written.",
+  "oneOf": [
+    {
+      "description": "The decision was reviewed. The latest review event wins.",
+      "properties": {
+        "kind": {
+          "const": "review",
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ReviewStatus"
+        }
+      },
+      "required": [
+        "kind",
+        "status"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "The decision ended up in this commit. A decision may be linked to several.",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/CommitId"
+        },
+        "kind": {
+          "const": "link",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "commit"
+      ],
+      "type": "object"
+    }
+  ],
+  "properties": {
+    "actor": {
+      "description": "Who did it (git `user.name` by default).",
+      "type": "string"
+    },
+    "decision": {
+      "$ref": "#/$defs/DecisionId"
+    },
+    "id": {
+      "$ref": "#/$defs/EventId"
+    },
+    "schema": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "id",
+    "decision",
+    "timestamp",
+    "actor"
+  ],
+  "title": "Event",
+  "type": "object"
+}
