@@ -6,3 +6,5 @@
 .vscode/
 *.swp
 .claude/settings.local.json
+**/mutants.out*/
+rustc-ice-*.txt
