@@ -75,6 +75,9 @@ pub enum Command {
     /// Always exits 0 so a problem never interrupts the agent; failures are written to
     /// .concede/capture-errors.log.
     Capture,
+
+    /// Run the MCP server over stdio, exposing `record_decision` and `why` to agents.
+    Mcp,
 }
 
 #[derive(Debug, Args)]

@@ -222,3 +222,79 @@ fn log_reads_json_from_stdin_and_reports_bad_input() {
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("no decision or capture matches"));
 }
+
+/// Drive `concede mcp` over stdio with JSON-RPC, the way Claude Code does.
+#[test]
+fn mcp_server_records_decisions_with_the_session_from_the_environment() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let repo = Repo::new();
+    repo.write("a.txt", "one\n");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "base"]);
+    repo.write("a.txt", "one\ntwo\n");
+
+    let mut child = Command::new(CONCEDE)
+        .arg("mcp")
+        .current_dir(repo.path())
+        .env("CLAUDE_CODE_SESSION_ID", "mcp-session")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut call = |message: Value| -> Option<Value> {
+        writeln!(stdin, "{message}").unwrap();
+        message.get("id")?;
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        Some(serde_json::from_str(&line).unwrap())
+    };
+
+    let init = call(
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "test", "version": "0"}}}),
+    )
+    .unwrap();
+    assert_eq!(init["result"]["serverInfo"]["name"], "concede");
+    call(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    let tools = call(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["record_decision", "why"]);
+
+    let result = call(
+        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+        "name": "record_decision", "arguments": {
+            "task": "Add a second line", "reasoning": "Needed for the test",
+            "files": [{"path": "a.txt"}], "model": "test-model"}}}),
+    )
+    .unwrap();
+    let text = result["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("Recorded decision"), "{result}");
+    assert!(text.contains("a.txt: lines 2"), "{text}");
+
+    let bad = call(
+        json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+        "name": "why", "arguments": {"path": "a.txt", "lines": "zero"}}}),
+    )
+    .unwrap();
+    assert_eq!(bad["result"]["isError"], true);
+
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+
+    let inbox = repo.json(&["inbox", "--json"]);
+    let decision = &inbox["sessions"][0]["decisions"][0];
+    assert_eq!(inbox["sessions"][0]["session"], "mcp-session");
+    assert_eq!(decision["agent"]["model"], "test-model");
+    assert_eq!(decision["source"], "agent");
+}

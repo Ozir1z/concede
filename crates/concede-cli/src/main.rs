@@ -3,6 +3,7 @@
 
 mod args;
 mod input;
+mod mcp;
 mod output;
 
 use std::io::Read;
@@ -98,6 +99,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Command::Mcp => mcp::serve(concede),
         Command::Capture => unreachable!("handled before run()"),
     }
 }
