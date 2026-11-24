@@ -1,14 +1,14 @@
 # CLAUDE.md
 
-Torch (working name): a native, open-source IDE for AI-augmented coding.
+Concede: a native, open-source IDE for AI-augmented coding.
 `docs/VISION.md` is the source of truth for goals, interaction model, pillars, AI rules and
 architecture. Design decisions are in `docs/decisions/`.
 
 ## Layout
 
-- `crates/torch-core`: all domain logic (decision log, rules, criticality, `ChangeStore`).
-- `crates/torch-cli`: `torch` binary and MCP server; thin layer over core.
-- `crates/torch-app`: GPUI desktop app; thin layer over core.
+- `crates/concede-core`: all domain logic (decision log, rules, criticality, `ChangeStore`).
+- `crates/concede-cli`: `concede` binary and MCP server; thin layer over core.
+- `crates/concede-app`: GPUI desktop app; thin layer over core.
 
 ## Commands
 
@@ -17,8 +17,8 @@ cargo build                                  # build everything
 cargo test --workspace                       # run tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all                              # format (CI runs --check)
-cargo run -p torch-app                       # open the app
-cargo run -p torch-cli -- <args>             # run the CLI (binary name: torch)
+cargo run -p concede-app                     # open the app
+cargo run -p concede-cli -- <args>           # run the CLI (binary name: concede)
 ```
 
 Linux needs GPUI's system libraries (see `.github/workflows/ci.yml` for the apt list).
@@ -41,5 +41,5 @@ Linux needs GPUI's system libraries (see `.github/workflows/ci.yml` for the apt 
 - Snappy is non-negotiable: no blocking work on the UI thread, heavy work in background
   tasks. Anything over 16 ms on the UI thread is a bug.
 - Language intelligence comes from LSP and tree-sitter. No custom parsers.
-- All logic lives in `torch-core`. All git access goes through the `ChangeStore` trait.
+- All logic lives in `concede-core`. All git access goes through the `ChangeStore` trait.
 - GPUI is pinned to a Zed git rev (ADR 0002). Bump rev and `rust-toolchain.toml` together.

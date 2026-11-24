@@ -1,13 +1,13 @@
 [package]
-name = "torch-app"
-description = "Torch native desktop app (GPUI)."
+name = "concede-app"
+description = "Concede native desktop app (GPUI)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-torch-core.workspace = true
+concede-core.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 

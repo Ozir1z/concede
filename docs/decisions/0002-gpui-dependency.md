@@ -5,7 +5,7 @@
 
 ## Context
 
-`torch-app` is built on GPUI, Zed's GPU-accelerated UI framework (Apache-2.0). As of
+`concede-app` is built on GPUI, Zed's GPU-accelerated UI framework (Apache-2.0). As of
 2026-11-24:
 
 - The official `gpui` crate on crates.io (owned by zed-industries) is at 0.2.2, published

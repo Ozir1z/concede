@@ -5,7 +5,7 @@
 
 ## Context
 
-Torch is a decision-traceability tool: it records why each change was made. We should
+Concede is a decision-traceability tool: it records why each change was made. We should
 follow that practice ourselves, so future contributors (human or AI) can see why the
 project looks the way it does.
 

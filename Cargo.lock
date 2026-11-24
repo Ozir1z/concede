@@ -778,6 +778,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
+name = "concede-app"
+version = "0.1.0"
+dependencies = [
+ "concede-core",
+ "gpui",
+ "gpui_platform",
+]
+
+[[package]]
+name = "concede-cli"
+version = "0.1.0"
+dependencies = [
+ "concede-core",
+]
+
+[[package]]
+name = "concede-core"
+version = "0.1.0"
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4903,26 +4923,6 @@ name = "toml_writer"
 version = "1.2.0+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
-
-[[package]]
-name = "torch-app"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "gpui_platform",
- "torch-core",
-]
-
-[[package]]
-name = "torch-cli"
-version = "0.1.0"
-dependencies = [
- "torch-core",
-]
-
-[[package]]
-name = "torch-core"
-version = "0.1.0"
 
 [[package]]
 name = "tracing"

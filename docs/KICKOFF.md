@@ -4,7 +4,7 @@ The original prompt used to kick off the project with Claude Code. Kept for hist
 
 ---
 
-You're helping me build Torch (working name), a free, open-source, native IDE for AI-augmented coding. Read `docs/VISION.md` before doing anything; it is the source of truth for goals, interaction model, pillars, AI rules and architecture.
+You're helping me build Concede, a free, open-source, native IDE for AI-augmented coding. Read `docs/VISION.md` before doing anything; it is the source of truth for goals, interaction model, pillars, AI rules and architecture.
 
 ## Context
 
@@ -12,7 +12,7 @@ You're helping me build Torch (working name), a free, open-source, native IDE fo
 - Everything is Rust. UI is GPUI (Zed's UI framework). Build on GPUI only; do not copy code from the Zed editor (GPL-3.0).
 - Snappy is non-negotiable. No blocking work on the UI thread; heavy work runs in background tasks.
 - Language intelligence comes from LSP (Roslyn LSP for C# first) and tree-sitter. Don't write custom parsers.
-- All logic lives in `torch-core`. The CLI and the app are thin layers on top.
+- All logic lives in `concede-core`. The CLI and the app are thin layers on top.
 - I have older code in a previous project (foa-torch). Ignore it unless I point you to it.
 
 ## Working rules
@@ -26,31 +26,31 @@ You're helping me build Torch (working name), a free, open-source, native IDE fo
 
 ## Phase 0: Scaffold
 
-- Cargo workspace with `crates/torch-core`, `crates/torch-cli`, `crates/torch-app`, plus `/docs`.
-- `torch-app`: minimal GPUI window that opens and shows "Torch". Check the current way to depend on GPUI (crates.io vs git) and record the choice in an ADR. Look at `gpui-component` as a possible component library and tell me if it's worth using.
+- Cargo workspace with `crates/concede-core`, `crates/concede-cli`, `crates/concede-app`, plus `/docs`.
+- `concede-app`: minimal GPUI window that opens and shows "Concede". Check the current way to depend on GPUI (crates.io vs git) and record the choice in an ADR. Look at `gpui-component` as a possible component library and tell me if it's worth using.
 - Apache-2.0 license, README (summarize VISION.md in under 20 lines), `.editorconfig`, `.gitignore`, `rustfmt.toml`.
 - A `CLAUDE.md` with build/test/run commands and the working rules above.
 - GitHub Actions workflow: build, test, clippy, fmt check on Linux, macOS and Windows.
 
-Done when: `cargo test` passes, `cargo run -p torch-app` opens a window, and CI is green.
+Done when: `cargo test` passes, `cargo run -p concede-app` opens a window, and CI is green.
 
 ## Phase 1: Decision log (the first real feature)
 
 Goal: every AI-made change leaves a "why" record in the repo, queryable per file and per line range.
 
-1. **Schema**: one JSON file per decision under `.torch/decisions/`, append-only. Fields at minimum: id, timestamp, agent/model, prompt or task summary, reasoning, files and hunk-level line ranges touched, alternatives considered, rule that allowed the action, review status (unreviewed / approved / rejected), linked commit (filled in later). Propose the schema as an ADR first. Hunk-level detail matters: later, a story must map to exactly the hunks it produced.
-2. **Core API** in `torch-core`: record a decision, list decisions for a file, list decisions for a line range, mark reviewed, link to commit. All git access goes through a `ChangeStore` trait. Implement it with plain git for now (shelling out to the git CLI or using `gix`; propose one in an ADR). Only add the methods this phase needs, like current HEAD and changed hunks.
-3. **CLI** (`torch-cli`): `torch log` (record), `torch why <file>[:line]` (history), `torch inbox` (unreviewed decisions), `torch link` (attach to HEAD commit).
+1. **Schema**: one JSON file per decision under `.concede/decisions/`, append-only. Fields at minimum: id, timestamp, agent/model, prompt or task summary, reasoning, files and hunk-level line ranges touched, alternatives considered, rule that allowed the action, review status (unreviewed / approved / rejected), linked commit (filled in later). Propose the schema as an ADR first. Hunk-level detail matters: later, a story must map to exactly the hunks it produced.
+2. **Core API** in `concede-core`: record a decision, list decisions for a file, list decisions for a line range, mark reviewed, link to commit. All git access goes through a `ChangeStore` trait. Implement it with plain git for now (shelling out to the git CLI or using `gix`; propose one in an ADR). Only add the methods this phase needs, like current HEAD and changed hunks.
+3. **CLI** (`concede-cli`): `concede log` (record), `concede why <file>[:line]` (history), `concede inbox` (unreviewed decisions), `concede link` (attach to HEAD commit).
 4. **Capture**:
-   - An MCP server in `torch-cli` exposing a `record_decision` tool, so agents log their reasoning as they work.
+   - An MCP server in `concede-cli` exposing a `record_decision` tool, so agents log their reasoning as they work.
    - A Claude Code hook config example (PostToolUse on edit/write tools) that records file changes automatically, so nothing is missed even if the agent forgets to log.
 5. **Tests** for schema validation, querying by line range, and the review status flow.
 
-Done when: I can run a Claude Code session in a sample repo, then run `torch why src/SomeFile.cs` and see which decisions touched it, with reasoning, and `torch inbox` shows what I haven't reviewed.
+Done when: I can run a Claude Code session in a sample repo, then run `concede why src/SomeFile.cs` and see which decisions touched it, with reasoning, and `concede inbox` shows what I haven't reviewed.
 
 ## Phase 2: Visual mode shell
 
-- `torch-app` opens a repo and shows the story inbox (unreviewed decisions from Phase 1), grouped by agent session.
+- `concede-app` opens a repo and shows the story inbox (unreviewed decisions from Phase 1), grouped by agent session.
 - Keyboard-first: default keybinds plus a vim-mode setting. Default: arrows move, Enter opens, `A`/`R` approve/reject. Vim mode: `hjkl`, `a`, `r`, `/`, `?`. Keybinds live in a config file.
 - Selecting a decision shows its reasoning and the touched code read-only, with the changed lines highlighted.
 - One key switches to code mode on the selected hunk (a basic editable text view is fine for now); Esc returns to the exact same spot in visual mode.
@@ -64,7 +64,7 @@ Done when: I can review and approve a day of agent work without leaving the keyb
 - Criticality engine (VISION.md section), starting with declared zones and LSP/tree-sitter code facts.
 - Change Stories view grouping changes by intent and ordering by dependency.
 - Version control layer: commit or branch a whole story at once, show all active branches and worktrees in one view, isolated worktrees for critical stories, Jujutsu as an alternative `ChangeStore` engine.
-- AI Rules config file (`.torch/rules`) enforced via hooks.
+- AI Rules config file (`.concede/rules`) enforced via hooks.
 - Full code mode: LSP (Roslyn), DAP debugging (netcoredbg), syntax via tree-sitter.
 - Project Wizard.
 - "Open in VS Code / Rider" escape hatch.

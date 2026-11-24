@@ -1,4 +1,4 @@
-# Torch: Vision (working name)
+# Concede: Vision
 
 Whiteboard: https://claude.ai/artifact/FzVe3gGvpkRHq7TwwTPFrR (private to the owner; this file is the in-repo copy)
 
@@ -25,7 +25,7 @@ A free, open-source, native IDE for a new era of writing code. Not another VS Co
 - **Code mode:** one key on any node zooms into the code for that symbol (not just the file). Esc zooms back to the same spot on the map. The transition is a real zoom, so the user never loses their place.
 - **Code in context:** while reviewing a story, code is shown inline in visual mode with criticality and history overlaid. Switch to code mode only to type.
 - **Keybinds:** sensible default keybinds (like Zed) plus an optional vim mode. Example vim-style bindings in visual mode: `hjkl` move between nodes, `a` approve, `r` reject, `/` search, `?` show why.
-- **Escape hatch:** "open in VS Code / Rider" on any file, so people can adopt Torch as a command center before switching editors.
+- **Escape hatch:** "open in VS Code / Rider" on any file, so people can adopt Concede as a command center before switching editors.
 
 ## Pillars
 
@@ -82,9 +82,9 @@ Flow: agent sessions → decision log (knows which intent produced each change) 
 Rust workspace. Language intelligence comes from standard protocols, not custom parsers.
 
 ```
-/crates/torch-core   decision log, rules, criticality, ChangeStore (git)
-/crates/torch-cli    CLI + MCP server for agents
-/crates/torch-app    native GPUI app (visual mode, code mode)
+/crates/concede-core   decision log, rules, criticality, ChangeStore (git)
+/crates/concede-cli    CLI + MCP server for agents
+/crates/concede-app    native GPUI app (visual mode, code mode)
 /docs                vision and decision records
 ```
 
@@ -103,5 +103,5 @@ Rust workspace. Language intelligence comes from standard protocols, not custom 
 
 ## Open questions
 
-- Final name (working: Torch).
+- ~~Final name~~: Concede (decided 2026-11-24, ADR 0004).
 - First language: C#/.NET via Roslyn LSP (assumed).

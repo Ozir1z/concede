@@ -1,6 +1,6 @@
 [package]
-name = "torch-core"
-description = "Core library for Torch: decision log, rules, criticality and change store."
+name = "concede-core"
+description = "Core library for Concede: decision log, rules, criticality and change store."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

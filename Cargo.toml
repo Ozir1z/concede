@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/torch-core", "crates/torch-cli", "crates/torch-app"]
+members = ["crates/concede-core", "crates/concede-cli", "crates/concede-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,7 +9,7 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-torch-core = { path = "crates/torch-core" }
+concede-core = { path = "crates/concede-core" }
 
 # GPUI is pinned to a Zed commit; see docs/decisions/0002-gpui-dependency.md.
 # Bump both together, and update rust-toolchain.toml to match Zed's at that commit.

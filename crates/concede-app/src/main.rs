@@ -1,4 +1,4 @@
-//! Torch desktop app. Thin GPUI layer over `torch-core`.
+//! Concede desktop app. Thin GPUI layer over `concede-core`.
 
 use gpui::{
     App, Bounds, Context, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
@@ -7,11 +7,11 @@ use gpui::{
 
 /// Root view: for now just shows the product name.
 #[derive(Debug)]
-struct TorchRoot {
+struct ConcedeRoot {
     title: SharedString,
 }
 
-impl Render for TorchRoot {
+impl Render for ConcedeRoot {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -31,7 +31,7 @@ fn main() {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some(torch_core::PRODUCT_NAME.into()),
+                title: Some(concede_core::PRODUCT_NAME.into()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -39,8 +39,8 @@ fn main() {
         // Failing to open the main window at startup is unrecoverable, so a panic with a
         // clear message is the right outcome here.
         cx.open_window(options, |_, cx| {
-            cx.new(|_| TorchRoot {
-                title: torch_core::PRODUCT_NAME.into(),
+            cx.new(|_| ConcedeRoot {
+                title: concede_core::PRODUCT_NAME.into(),
             })
         })
         .expect("failed to open the main window");

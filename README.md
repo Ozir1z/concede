@@ -1,9 +1,9 @@
-# Torch
+# Concede
 
-A free, open-source, native IDE for AI-augmented coding (working name).
+A free, open-source, native IDE for AI-augmented coding.
 
 AI writes most code now, but developers lose agency: agents produce more than anyone wants
-to review, and the reasoning behind each change disappears when the session ends. Torch
+to review, and the reasoning behind each change disappears when the session ends. Concede
 puts the human back in the driver's seat as navigator, reviewer and decision maker.
 
 - **Visual first.** Code Map, story inbox and decision timelines; one key zooms into code.
@@ -16,6 +16,6 @@ puts the human back in the driver's seat as navigator, reviewer and decision mak
 See [docs/VISION.md](docs/VISION.md) for the full vision and
 [docs/decisions/](docs/decisions/) for design decisions.
 
-Status: early scaffold. Build with `cargo build`; run the app with `cargo run -p torch-app`.
+Status: early scaffold. Build with `cargo build`; run the app with `cargo run -p concede-app`.
 
 Licensed under [Apache-2.0](LICENSE).
