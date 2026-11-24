@@ -1,0 +1,5 @@
+# Matches Zed's toolchain at the pinned GPUI commit (see Cargo.toml).
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
