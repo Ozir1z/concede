@@ -57,8 +57,14 @@ mod tests {
             if update {
                 std::fs::create_dir_all(&dir).unwrap();
                 std::fs::write(&path, &generated).unwrap();
-            } else if std::fs::read_to_string(&path).ok().as_deref() != Some(generated.as_str()) {
-                stale.push(name);
+            } else {
+                // Ignore line endings: a Windows checkout may have converted LF to CRLF.
+                let on_disk = std::fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .replace("\r\n", "\n");
+                if on_disk != generated {
+                    stale.push(name);
+                }
             }
         }
         assert!(

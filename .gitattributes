@@ -1,0 +1,4 @@
+# Check out text files with LF on every platform. Generated files (docs/schema) are
+# compared byte for byte in tests, and records in .concede/ should diff the same
+# everywhere.
+* text=auto eol=lf
