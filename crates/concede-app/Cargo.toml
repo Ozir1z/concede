@@ -9,6 +9,9 @@ publish.workspace = true
 
 [dependencies]
 concede-core.workspace = true
+# chrono is already a project dependency (concede-core, concede-cli); used here only
+# to format decision timestamps in the local timezone, matching the CLI's inbox.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 gpui.workspace = true
 gpui_platform.workspace = true
 
