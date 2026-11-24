@@ -19,7 +19,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all                              # format (CI runs --check)
 cargo run -p concede-app                     # open the app
 cargo run -p concede-cli -- <args>           # run the CLI (binary name: concede)
+CONCEDE_UPDATE_SCHEMA=1 cargo test -p concede-core schema   # regenerate docs/schema
 ```
+
+CLI commands: `log`, `why <file>[:lines]`, `inbox`, `review <id> --approve|--reject`,
+`link`, `capture` (hook entry point, always exits 0) and `mcp` (MCP server over stdio).
+Read commands take `--json`. Setup for Claude Code is in `docs/capture.md`.
+
+Use `/scratch/` (git-ignored) for throwaway repos and probes.
 
 Linux needs GPUI's system libraries (see `.github/workflows/ci.yml` for the apt list).
 

@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "concede": { "command": "concede", "args": ["mcp"] }
+  }
+}
