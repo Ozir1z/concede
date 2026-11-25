@@ -60,6 +60,18 @@ fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
         }
+        Command::Stories { json } => {
+            let loaded = concede.load()?;
+            for warning in &loaded.warnings {
+                eprintln!("warning: {warning}");
+            }
+            if json {
+                output::print_json(&output::stories_json(&loaded.log))
+            } else {
+                output::print_stories(&loaded.log);
+                Ok(())
+            }
+        }
         Command::Review {
             id,
             approve,

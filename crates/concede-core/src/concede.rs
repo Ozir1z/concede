@@ -42,6 +42,8 @@ pub struct NewDecision {
     pub source: Source,
     pub agent: Option<AgentInfo>,
     pub task: String,
+    /// The intent (change story) this decision belongs to, if tagged (ADR 0011).
+    pub intent: Option<String>,
     pub reasoning: String,
     pub alternatives: Vec<Alternative>,
     /// Defaults to [`UNCONFIGURED_RULE`] when `None`.
@@ -320,6 +322,7 @@ impl<C: ChangeStore> Concede<C> {
                 .unwrap_or_else(|| UNCONFIGURED_RULE.to_owned()),
         );
         decision.agent = input.agent;
+        decision.intent = input.intent;
         decision.reasoning = input.reasoning;
         decision.alternatives = input.alternatives;
         decision.base_commit = base;
@@ -552,6 +555,7 @@ mod tests {
             source: Source::Agent,
             agent: Some(agent(session)),
             task: task.into(),
+            intent: None,
             reasoning: format!("reasoning for {task}"),
             alternatives: vec![],
             allowed_by: None,

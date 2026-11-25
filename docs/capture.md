@@ -5,8 +5,9 @@ Concede records two things while an agent works (ADR 0007):
 - **Captures**: a PostToolUse hook runs `concede capture` after every file edit. It
   records exactly which lines changed, but not why.
 - **Decisions**: the agent calls the `record_decision` MCP tool with the task, its
-  reasoning and the alternatives it rejected. The decision claims the captures from the
-  same session, so the reasoning is attached to the exact lines.
+  reasoning, the alternatives it rejected and, optionally, an `intent` label grouping
+  the decisions that serve one purpose (see `concede stories`). The decision claims the
+  captures from the same session, so the reasoning is attached to the exact lines.
 
 Captures that no decision claims show up in `concede inbox` as **unexplained changes**,
 so nothing goes unrecorded when an agent forgets to log.

@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
 use concede_core::{
-    Capture, Decision, DecisionState, LinkOutcome, Log, MappedHunk, Mapping, ReviewStatus, Why,
-    WhyRecord,
+    Capture, Decision, DecisionState, LinkOutcome, Log, MappedHunk, Mapping, ReviewStatus, Story,
+    StoryKey, StoryStatus, Why, WhyRecord,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -317,6 +317,96 @@ pub fn inbox_json(log: &Log) -> Value {
         .map(|g| json!({ "session": g.session, "decisions": g.decisions }))
         .collect();
     json!({ "sessions": sessions, "unexplained": inbox.unexplained })
+}
+
+// ---------------------------------------------------------------------------------------
+// stories
+// ---------------------------------------------------------------------------------------
+
+fn story_heading(key: StoryKey) -> String {
+    match key {
+        StoryKey::Intent(intent) => format!("Intent: {intent}"),
+        StoryKey::Session(session) => format!("Session {session} (no intent)"),
+        StoryKey::Ungrouped => "Ungrouped".to_owned(),
+    }
+}
+
+fn story_status_label(story: &Story) -> String {
+    match story.status() {
+        StoryStatus::Unreviewed => "unreviewed".to_owned(),
+        StoryStatus::Reviewed => "reviewed".to_owned(),
+        StoryStatus::Mixed => {
+            let done = story.review.approved + story.review.rejected;
+            format!("{done} of {} reviewed", story.review.total())
+        }
+    }
+}
+
+pub fn print_stories(log: &Log) {
+    let stories = log.stories();
+    if stories.is_empty() {
+        println!("No decisions recorded yet.");
+        return;
+    }
+    let short = ShortIds::new(log);
+    println!("Change stories ({})", stories.len());
+    for story in &stories {
+        println!(
+            "\n  {}  [{}]",
+            story_heading(story.key),
+            story_status_label(story)
+        );
+        for d in &story.decisions {
+            println!(
+                "    {}  {}  {}  {}",
+                short.get(&d.id.to_string()),
+                local(&d.timestamp),
+                status_label(log.state(&d.id).review),
+                d.task
+            );
+        }
+        let files: Vec<String> = story.files.iter().map(|p| p.to_string()).collect();
+        if !files.is_empty() {
+            println!("    files: {}", files.join(", "));
+        }
+    }
+    println!();
+    println!("Review with: concede review <id> --approve   (or --reject --note \"...\")");
+}
+
+fn story_status_json(status: StoryStatus) -> &'static str {
+    match status {
+        StoryStatus::Unreviewed => "unreviewed",
+        StoryStatus::Mixed => "mixed",
+        StoryStatus::Reviewed => "reviewed",
+    }
+}
+
+pub fn stories_json(log: &Log) -> Value {
+    let stories: Vec<Value> = log
+        .stories()
+        .iter()
+        .map(|story| {
+            let (kind, key) = match story.key {
+                StoryKey::Intent(intent) => ("intent", Some(intent)),
+                StoryKey::Session(session) => ("session", Some(session)),
+                StoryKey::Ungrouped => ("ungrouped", None),
+            };
+            json!({
+                "kind": kind,
+                "key": key,
+                "status": story_status_json(story.status()),
+                "review": {
+                    "unreviewed": story.review.unreviewed,
+                    "approved": story.review.approved,
+                    "rejected": story.review.rejected,
+                },
+                "files": story.files,
+                "decisions": story.decisions,
+            })
+        })
+        .collect();
+    json!({ "stories": stories })
 }
 
 pub fn link_json(outcome: &LinkOutcome) -> Value {

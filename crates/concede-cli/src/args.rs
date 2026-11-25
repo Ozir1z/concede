@@ -40,6 +40,13 @@ pub enum Command {
         json: bool,
     },
 
+    /// Group decisions into change stories, by intent (then session).
+    Stories {
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Approve or reject a decision, or an unexplained change.
     Review {
         /// Decision or capture id; a unique prefix is enough.
@@ -89,6 +96,11 @@ pub struct LogArgs {
     #[arg(long, required_unless_present = "stdin")]
     pub task: Option<String>,
 
+    /// The intent (change story) this change belongs to: a short label grouping
+    /// decisions that serve one purpose, e.g. "order-validation".
+    #[arg(long)]
+    pub intent: Option<String>,
+
     /// Why the change was made.
     #[arg(long, required_unless_present = "stdin")]
     pub reasoning: Option<String>,
@@ -122,7 +134,7 @@ pub struct LogArgs {
     pub claims: Vec<String>,
 
     /// Read the decision as JSON from stdin instead of from flags.
-    #[arg(long, conflicts_with_all = ["task", "reasoning", "files", "alternatives", "agent", "claims"])]
+    #[arg(long, conflicts_with_all = ["task", "intent", "reasoning", "files", "alternatives", "agent", "claims"])]
     pub stdin: bool,
 
     /// Print the recorded decision as JSON.

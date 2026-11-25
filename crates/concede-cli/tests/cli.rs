@@ -178,6 +178,76 @@ fn capture_log_review_link_and_why() {
 }
 
 #[test]
+fn stories_group_by_intent_across_sessions() {
+    let repo = Repo::new();
+    repo.write("a.txt", "one\n");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "base"]);
+    repo.write("a.txt", "one\ntwo\n");
+
+    // Two decisions in different sessions share an intent; a third is untagged.
+    let log = |task: &str, session: &str, intent: Option<&str>| -> String {
+        let mut args = vec![
+            "log",
+            "--json",
+            "--task",
+            task,
+            "--reasoning",
+            "because",
+            "--file",
+            "a.txt",
+            "--agent",
+            "claude-code",
+            "--session",
+            session,
+        ];
+        if let Some(intent) = intent {
+            args.push("--intent");
+            args.push(intent);
+        }
+        repo.json(&args)["id"].as_str().unwrap().to_owned()
+    };
+    let first = log("A", "s1", Some("order-validation"));
+    log("B", "s2", Some("order-validation"));
+    log("C", "s1", None);
+
+    let stories = repo.json(&["stories", "--json"]);
+    let all = stories["stories"].as_array().unwrap();
+
+    // The shared intent collapses the two sessions into one story.
+    let intent = all.iter().find(|s| s["kind"] == "intent").unwrap();
+    assert_eq!(intent["key"], "order-validation");
+    assert_eq!(intent["decisions"].as_array().unwrap().len(), 2);
+    assert_eq!(intent["status"], "unreviewed");
+    assert_eq!(intent["files"], json!(["a.txt"]));
+
+    // The untagged decision falls back to its session.
+    let session = all.iter().find(|s| s["kind"] == "session").unwrap();
+    assert_eq!(session["key"], "s1");
+    assert_eq!(session["decisions"].as_array().unwrap().len(), 1);
+
+    // Approving one decision in the intent story makes it mixed.
+    repo.ok(&["review", &first, "--approve"]);
+    let stories = repo.json(&["stories", "--json"]);
+    let intent = stories["stories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["kind"] == "intent")
+        .unwrap()
+        .clone();
+    assert_eq!(intent["status"], "mixed");
+    assert_eq!(intent["review"]["approved"], 1);
+    assert_eq!(intent["review"]["unreviewed"], 1);
+
+    // Text output names the story.
+    assert!(
+        repo.ok(&["stories"]).contains("Intent: order-validation"),
+        "text output should name the intent story"
+    );
+}
+
+#[test]
 fn capture_never_fails_the_agent() {
     let repo = Repo::new();
     for payload in [

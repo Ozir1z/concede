@@ -73,6 +73,7 @@ pub fn decision_from_args(args: LogArgs) -> Result<NewDecision> {
         },
         agent,
         task: args.task.unwrap_or_default(),
+        intent: args.intent,
         reasoning: args.reasoning.unwrap_or_default(),
         alternatives: args
             .alternatives
@@ -98,6 +99,8 @@ pub fn decision_from_args(args: LogArgs) -> Result<NewDecision> {
 #[serde(deny_unknown_fields)]
 struct LogInput {
     task: String,
+    #[serde(default)]
+    intent: Option<String>,
     reasoning: String,
     #[serde(default)]
     files: Vec<FileInput>,
@@ -146,6 +149,7 @@ pub fn decision_from_json(text: &str) -> Result<NewDecision> {
         },
         agent: input.agent,
         task: input.task,
+        intent: input.intent,
         reasoning: input.reasoning,
         alternatives: input.alternatives,
         allowed_by: input.allowed_by,
@@ -208,13 +212,14 @@ mod tests {
     #[test]
     fn json_input_matches_the_flags() {
         let json = r#"{
-            "task": "Add retry", "reasoning": "flaky network",
+            "task": "Add retry", "intent": "resilience", "reasoning": "flaky network",
             "files": [{"path": "src/a.cs", "lines": ["40-52", "60"]}],
             "alternatives": [{"option": "Polly", "rejected_because": "dependency"}],
             "agent": {"tool": "claude-code", "model": "claude-opus-5-5", "session": "s1"}
         }"#;
         let d = decision_from_json(json).unwrap();
         assert_eq!(d.source, Source::Agent);
+        assert_eq!(d.intent.as_deref(), Some("resilience"));
         assert_eq!(
             d.files[0].lines,
             vec![r(40, 52).unwrap(), r(60, 60).unwrap()]

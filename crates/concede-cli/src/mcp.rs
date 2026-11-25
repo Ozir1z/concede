@@ -55,6 +55,11 @@ pub struct AlternativeParam {
 pub struct RecordDecisionParams {
     /// The task or user request this change served, in one sentence.
     pub task: String,
+    /// The intent (change story) this change belongs to: a short, stable label you
+    /// reuse across the decisions that serve one purpose, e.g. "order-validation".
+    /// Changes sharing an intent are grouped into one story for review.
+    #[serde(default)]
+    pub intent: Option<String>,
     /// Why you made this change this way: the reasoning a reviewer needs.
     pub reasoning: String,
     /// The files this change touched.
@@ -200,6 +205,7 @@ impl ConcedeServer {
                 session: self.session.clone(),
             }),
             task: params.task,
+            intent: params.intent.filter(|i| !i.trim().is_empty()),
             reasoning: params.reasoning,
             alternatives: params
                 .alternatives
