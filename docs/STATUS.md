@@ -95,3 +95,25 @@ and the app, while untagged work falls back to session groups; approving part of
 story shows a `N of M reviewed` status.
 
 ~96 tests (`cargo test --workspace`), clippy and fmt clean.
+
+## Phase 4 — Code Map ⏳ (next)
+
+Decided after a step-back review (ADR 0012): the app so far is a strong *reviewer*
+but not yet the *navigator* the vision calls for — the home is a list, not a map.
+Phase 4 builds **pillar 2, the Code Map**, to fix the first impression and make
+Concede feel like a place you work, not a PR queue.
+
+Direction (full plan in `plans/prompts/start-phase-4-code-map.md`, decision in
+ADR 0012):
+
+- **Existing codebases first**: opening a repo does an initial read and builds a
+  structure map (modules → types → members) via **tree-sitter** (C# first), with
+  changed areas glowing from the decision log + git change heat we already have,
+  and one-key zoom from a node into its code (Esc zooms back to the same spot).
+- **New-project wizard (pillar 1) is deferred** — nothing to map yet.
+- Still on **raw GPUI** (ADR 0008); tree-sitter is a parsing lib, not a GPUI type.
+- Criticality, version-control-by-story and the agent loop remain on the roadmap
+  after the map (ADR 0012).
+
+Likely new dependency: `tree-sitter` + `tree-sitter-c-sharp` (to be agreed per the
+working rules before adding).
