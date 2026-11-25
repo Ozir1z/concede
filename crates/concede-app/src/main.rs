@@ -5,6 +5,8 @@
 //! - step 3: a detail pane — selecting a decision shows its reasoning, the
 //!   alternatives it rejected, and the touched code read-only with the changed
 //!   lines highlighted (ranges mapped onto the current file via `why`).
+//!   Draggable scrollbars: vertical on the list and detail panes, horizontal on
+//!   each code block (lines don't wrap).
 //!
 //! Selection is by click for now; keyboard navigation comes in a later step.
 
@@ -14,8 +16,9 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Local, Utc};
 use concede_core::{ChangeStore, Concede, Decision, MappedHunk, Mapping, PRODUCT_NAME, WhyRecord};
 use gpui::{
-    App, Bounds, Context, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size,
+    App, Bounds, Context, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollHandle,
+    SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, div, point, prelude::*, px,
+    rgb, size,
 };
 
 // A small dark palette. Colours live here so later steps (and a light theme) have
@@ -27,10 +30,14 @@ const ROW_SELECTED: u32 = 0x33406a;
 const ROW_HOVER: u32 = 0x2e2e34;
 const CODE_BG: u32 = 0x202024;
 const CODE_HIGHLIGHT: u32 = 0x3a3b2a;
+const SCROLL_THUMB: u32 = 0x55555f;
 const TEXT: u32 = 0xf0f0f0;
 const MUTED: u32 = 0x9a9aa2;
 const FAINT: u32 = 0x6c6c74;
 const ACCENT: u32 = 0x8ab4ff;
+
+/// Smallest scrollbar thumb, in pixels, so it stays grabbable on long content.
+const MIN_THUMB: f32 = 28.0;
 
 /// One unreviewed decision in the list, flattened to owned strings.
 #[derive(Debug, Clone)]
@@ -92,6 +99,23 @@ impl AppData {
     fn total(&self) -> usize {
         self.details.len()
     }
+}
+
+/// An in-progress scrollbar drag: which scroll handle, along which axis, and
+/// where the grab started (so moves map to a new offset). `ScrollHandle` is an
+/// `Rc`, so cloning it is cheap and shares the same scroll state.
+#[derive(Clone)]
+struct Drag {
+    handle: ScrollHandle,
+    vertical: bool,
+    /// Mouse position along the axis when the grab started, in pixels.
+    start_mouse: f32,
+    /// The handle's offset along the axis when the grab started (<= 0).
+    start_offset: f32,
+    /// Track length minus thumb length: how far the thumb can travel.
+    usable: f32,
+    /// Maximum scroll distance (content length minus viewport).
+    max: f32,
 }
 
 /// Read the decision log at `root` and build both the list rows and the per-decision
@@ -324,20 +348,65 @@ struct ConcedeRoot {
     data: AppData,
     /// Flat index of the selected decision across all sessions.
     selected: usize,
+    list_scroll: ScrollHandle,
+    detail_scroll: ScrollHandle,
+    /// One per file of the selected decision (for horizontal code scrolling).
+    code_scrolls: Vec<ScrollHandle>,
+    /// The scrollbar drag in progress, if any.
+    drag: Option<Drag>,
+    /// Scroll geometry is only known after the first layout, so we request one
+    /// extra frame on startup to draw the scrollbars at their true sizes.
+    primed: bool,
 }
 
 impl ConcedeRoot {
     fn new(data: AppData) -> Self {
+        // A stable pool of code scroll handles, one per file slot, sized to the
+        // decision with the most files. Reused across selections (never recreated)
+        // so GPUI keeps each slot's measured geometry — recreating a handle under
+        // the same element id loses it, which breaks the horizontal scrollbar.
+        let max_files = data
+            .details
+            .iter()
+            .map(|d| d.files.len())
+            .max()
+            .unwrap_or(0);
         Self {
             title: PRODUCT_NAME.into(),
             data,
             selected: 0,
+            list_scroll: ScrollHandle::new(),
+            detail_scroll: ScrollHandle::new(),
+            code_scrolls: (0..max_files).map(|_| ScrollHandle::new()).collect(),
+            drag: None,
+            primed: false,
         }
+    }
+
+    /// Reset the per-file scroll handles and the detail scroll when the selection
+    /// changes, so the new decision starts scrolled to the top.
+    fn select(&mut self, index: usize) {
+        self.selected = index;
+        // Reset scroll positions to the top/left, reusing the stable handles.
+        self.detail_scroll.set_offset(point(px(0.0), px(0.0)));
+        for handle in &self.code_scrolls {
+            handle.set_offset(point(px(0.0), px(0.0)));
+        }
+        // The newly shown files have no measured geometry until the next layout,
+        // so draw one more frame after it (as on startup) to size their
+        // horizontal scrollbars correctly.
+        self.primed = false;
     }
 }
 
 impl Render for ConcedeRoot {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Draw once more after the first layout, when scroll geometry is known.
+        if !self.primed {
+            self.primed = true;
+            cx.notify();
+        }
+
         let header = div()
             .flex()
             .items_baseline()
@@ -366,8 +435,10 @@ impl Render for ConcedeRoot {
             div()
                 .flex()
                 .flex_1()
+                .min_h_0()
+                .min_w_0()
                 .child(self.inbox_list(cx))
-                .child(self.detail_pane())
+                .child(self.detail_pane(cx))
                 .into_any_element()
         };
 
@@ -377,6 +448,40 @@ impl Render for ConcedeRoot {
             .size_full()
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
+            // Dragging a scrollbar thumb: track the move anywhere in the window,
+            // and end the drag on mouse up.
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
+                let Some(drag) = this.drag.clone() else {
+                    return;
+                };
+                let pos = if drag.vertical {
+                    f32::from(ev.position.y)
+                } else {
+                    f32::from(ev.position.x)
+                };
+                let delta = pos - drag.start_mouse;
+                let started = -drag.start_offset;
+                let scrolled = if drag.usable > 0.0 {
+                    (started + delta / drag.usable * drag.max).clamp(0.0, drag.max)
+                } else {
+                    0.0
+                };
+                let offset = if drag.vertical {
+                    point(px(0.0), px(-scrolled))
+                } else {
+                    point(px(-scrolled), px(0.0))
+                };
+                drag.handle.set_offset(offset);
+                cx.notify();
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _ev: &MouseUpEvent, _window, cx| {
+                    if this.drag.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .child(header)
             .child(body)
     }
@@ -411,7 +516,7 @@ impl ConcedeRoot {
                         .hover(|style| style.bg(rgb(ROW_HOVER)))
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.selected = index;
+                            this.select(index);
                             cx.notify();
                         }))
                         .child(
@@ -446,23 +551,31 @@ impl ConcedeRoot {
             );
         }
 
-        div()
+        let list = div()
             .id("inbox-list")
             .flex()
             .flex_col()
-            .w(px(380.))
-            .h_full()
+            .size_full()
             .gap_4()
             .p_4()
+            .overflow_y_scroll()
+            .track_scroll(&self.list_scroll)
+            .on_scroll(cx.listener(|_this, _ev, _window, cx| cx.notify()))
+            .children(sessions);
+
+        div()
+            .relative()
+            .w(px(380.0))
+            .h_full()
             .border_r_1()
             .border_color(rgb(DIVIDER))
-            .overflow_y_scroll()
-            .children(sessions)
+            .child(list)
+            .children(vertical_scrollbar(&self.list_scroll, cx))
             .into_any_element()
     }
 
     /// The detail of the selected decision (right pane).
-    fn detail_pane(&self) -> gpui::AnyElement {
+    fn detail_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(detail) = self.data.details.get(self.selected) else {
             return div().flex_1().into_any_element();
         };
@@ -473,6 +586,7 @@ impl ConcedeRoot {
             div()
                 .flex()
                 .flex_col()
+                .min_w_0()
                 .gap_1()
                 .child(div().text_xl().child(detail.task.clone()))
                 .child(
@@ -508,20 +622,30 @@ impl ConcedeRoot {
             ));
         }
 
-        for file in &detail.files {
-            sections.push(file_section(file));
+        for (i, file) in detail.files.iter().enumerate() {
+            sections.push(file_section(i, file, self.code_scrolls.get(i), cx));
         }
 
-        div()
+        let content = div()
             .id("detail")
             .flex()
             .flex_col()
-            .flex_1()
-            .h_full()
+            .size_full()
+            .min_w_0()
             .gap_5()
             .p_5()
             .overflow_y_scroll()
-            .children(sections)
+            .track_scroll(&self.detail_scroll)
+            .on_scroll(cx.listener(|_this, _ev, _window, cx| cx.notify()))
+            .children(sections);
+
+        div()
+            .relative()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .child(content)
+            .children(vertical_scrollbar(&self.detail_scroll, cx))
             .into_any_element()
     }
 }
@@ -531,6 +655,7 @@ fn section(title: &str, body: impl IntoElement) -> gpui::AnyElement {
     div()
         .flex()
         .flex_col()
+        .min_w_0()
         .gap_2()
         .child(
             div()
@@ -543,8 +668,14 @@ fn section(title: &str, body: impl IntoElement) -> gpui::AnyElement {
 }
 
 /// A touched file: its path and changed-line label, then the code with the
-/// changed lines highlighted (or a note when the file can't be read).
-fn file_section(file: &FileDetail) -> gpui::AnyElement {
+/// changed lines highlighted, horizontally scrollable (or a note when the file
+/// can't be read).
+fn file_section(
+    i: usize,
+    file: &FileDetail,
+    scroll: Option<&ScrollHandle>,
+    cx: &mut Context<ConcedeRoot>,
+) -> gpui::AnyElement {
     let heading = div()
         .flex()
         .gap_3()
@@ -558,7 +689,11 @@ fn file_section(file: &FileDetail) -> gpui::AnyElement {
         );
 
     let body = if let Some(note) = &file.note {
-        div().text_sm().text_color(rgb(MUTED)).child(note.clone())
+        div()
+            .text_sm()
+            .text_color(rgb(MUTED))
+            .child(note.clone())
+            .into_any_element()
     } else {
         let rows = file.code.iter().map(|line| {
             div()
@@ -567,29 +702,188 @@ fn file_section(file: &FileDetail) -> gpui::AnyElement {
                 .when(line.highlighted, |row| row.bg(rgb(CODE_HIGHLIGHT)))
                 .child(
                     div()
-                        .w(px(44.))
+                        .flex_none()
+                        .w(px(44.0))
                         .text_color(rgb(FAINT))
                         .child(format!("{:>4}", line.number)),
                 )
-                .child(div().text_color(rgb(TEXT)).child(line.text.clone()))
+                .child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_color(rgb(TEXT))
+                        .child(line.text.clone()),
+                )
         });
-        div()
+
+        // Content sized to the widest line: flex_none stops it shrinking to the
+        // scroller's width, and items_start stops rows stretching, so the widest
+        // line sets the width and the block can overflow and scroll horizontally.
+        let code_inner = div()
             .flex()
             .flex_col()
+            .flex_none()
+            .items_start()
             .p_3()
+            .children(rows);
+
+        // A flex row so its flex_none child keeps its content width instead of
+        // being sized to the (bounded) scroller width.
+        let scroller = div()
+            .id(("code", i))
+            .flex()
+            .w_full()
+            .min_w_0()
+            .overflow_x_scroll()
+            .child(code_inner);
+        let scroller = match scroll {
+            Some(handle) => scroller
+                .track_scroll(handle)
+                .on_scroll(cx.listener(|_this, _ev, _window, cx| cx.notify())),
+            None => scroller,
+        };
+
+        // The horizontal scrollbar is a sibling of the scroll area (not inside
+        // it), so it stays put instead of scrolling with the code.
+        let mut wrapper = div()
+            .relative()
+            .min_w_0()
             .rounded_md()
             .bg(rgb(CODE_BG))
             .text_sm()
-            .children(rows)
+            .child(scroller);
+        if let Some(handle) = scroll {
+            wrapper = wrapper.children(horizontal_scrollbar(handle, cx));
+        }
+        wrapper.into_any_element()
     };
 
     div()
         .flex()
         .flex_col()
+        .min_w_0()
         .gap_2()
         .child(heading)
         .child(body)
         .into_any_element()
+}
+
+/// A draggable vertical scrollbar overlay for a scroll handle, or `None` when the
+/// content fits. Position it inside a `relative` wrapper beside the scroll area.
+fn vertical_scrollbar(
+    handle: &ScrollHandle,
+    cx: &mut Context<ConcedeRoot>,
+) -> Option<gpui::AnyElement> {
+    let max = f32::from(handle.max_offset().y);
+    let viewport = f32::from(handle.bounds().size.height);
+    if max <= 1.0 || viewport <= 0.0 {
+        return None;
+    }
+    let thumb = (viewport * viewport / (viewport + max))
+        .max(MIN_THUMB)
+        .min(viewport);
+    let usable = (viewport - thumb).max(0.0);
+    let scrolled = (-f32::from(handle.offset().y)).clamp(0.0, max);
+    let top = if max > 0.0 {
+        scrolled / max * usable
+    } else {
+        0.0
+    };
+
+    let handle = handle.clone();
+    let thumb_el = div()
+        .absolute()
+        .top(px(top))
+        .right_0()
+        .w(px(8.0))
+        .h(px(thumb))
+        .rounded_full()
+        .bg(rgb(SCROLL_THUMB))
+        .cursor_pointer()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                this.drag = Some(Drag {
+                    handle: handle.clone(),
+                    vertical: true,
+                    start_mouse: f32::from(ev.position.y),
+                    start_offset: f32::from(handle.offset().y),
+                    usable,
+                    max,
+                });
+                cx.notify();
+            }),
+        );
+
+    Some(
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(px(10.0))
+            .child(thumb_el)
+            .into_any_element(),
+    )
+}
+
+/// A draggable horizontal scrollbar overlay for a scroll handle, or `None` when
+/// the content fits.
+fn horizontal_scrollbar(
+    handle: &ScrollHandle,
+    cx: &mut Context<ConcedeRoot>,
+) -> Option<gpui::AnyElement> {
+    let max = f32::from(handle.max_offset().x);
+    let viewport = f32::from(handle.bounds().size.width);
+    if max <= 1.0 || viewport <= 0.0 {
+        return None;
+    }
+    let thumb = (viewport * viewport / (viewport + max))
+        .max(MIN_THUMB)
+        .min(viewport);
+    let usable = (viewport - thumb).max(0.0);
+    let scrolled = (-f32::from(handle.offset().x)).clamp(0.0, max);
+    let left = if max > 0.0 {
+        scrolled / max * usable
+    } else {
+        0.0
+    };
+
+    let handle = handle.clone();
+    let thumb_el = div()
+        .absolute()
+        .left(px(left))
+        .bottom_0()
+        .h(px(8.0))
+        .w(px(thumb))
+        .rounded_full()
+        .bg(rgb(SCROLL_THUMB))
+        .cursor_pointer()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                this.drag = Some(Drag {
+                    handle: handle.clone(),
+                    vertical: false,
+                    start_mouse: f32::from(ev.position.x),
+                    start_offset: f32::from(handle.offset().x),
+                    usable,
+                    max,
+                });
+                cx.notify();
+            }),
+        );
+
+    Some(
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .h(px(10.0))
+            .child(thumb_el)
+            .into_any_element(),
+    )
 }
 
 /// A single centred block of text (empty state / message), filling the body.
