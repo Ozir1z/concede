@@ -14,6 +14,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
 use concede_core::{
@@ -182,6 +183,97 @@ const ACCENT: u32 = 0x8ab4ff;
 
 /// Smallest scrollbar thumb, in pixels, so it stays grabbable on long content.
 const MIN_THUMB: f32 = 28.0;
+
+/// The snappiness budget (CLAUDE.md): a frame's UI-thread build over this is a bug.
+const DEFAULT_FRAME_BUDGET: Duration = Duration::from_millis(16);
+/// Over-budget frames log at most this often (with a count of those suppressed).
+const FRAME_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Frame-time instrumentation (ADR 0010). Times our `render` build each frame and
+/// logs to stderr when it exceeds the budget. Breaches are throttled to roughly
+/// once a second with a count of the ones suppressed between, so a sustained slow
+/// state doesn't flood the console and the fast path stays a subtract-and-compare.
+///
+/// Env: `CONCEDE_FRAME_BUDGET_MS` tunes the budget; `CONCEDE_FRAME_TRACE=1` logs
+/// every frame's time (for active profiling).
+#[derive(Debug)]
+struct FrameStats {
+    budget: Duration,
+    trace: bool,
+    last_log: Option<Instant>,
+    suppressed: u32,
+}
+
+impl FrameStats {
+    fn new(budget: Duration, trace: bool) -> Self {
+        Self {
+            budget,
+            trace,
+            last_log: None,
+            suppressed: 0,
+        }
+    }
+
+    fn from_env() -> Self {
+        let budget = std::env::var("CONCEDE_FRAME_BUDGET_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|ms| *ms > 0.0)
+            .map(|ms| Duration::from_secs_f64(ms / 1000.0))
+            .unwrap_or(DEFAULT_FRAME_BUDGET);
+        let trace = matches!(
+            std::env::var("CONCEDE_FRAME_TRACE").ok().as_deref(),
+            Some("1") | Some("true") | Some("TRUE")
+        );
+        Self::new(budget, trace)
+    }
+
+    /// Decide what, if anything, to log for a frame that took `elapsed`, as of
+    /// `now`. Pure (no stderr, no clock), so the policy is unit-testable.
+    fn record_at(&mut self, elapsed: Duration, now: Instant) -> Option<String> {
+        if self.trace {
+            return Some(format!("concede: frame {:.1}ms", millis(elapsed)));
+        }
+        if elapsed <= self.budget {
+            return None;
+        }
+        let due = self
+            .last_log
+            .is_none_or(|last| now.saturating_duration_since(last) >= FRAME_LOG_INTERVAL);
+        if !due {
+            self.suppressed += 1;
+            return None;
+        }
+        let message = if self.suppressed > 0 {
+            format!(
+                "concede: slow frame {:.1}ms (budget {:.0}ms, +{} more since)",
+                millis(elapsed),
+                millis(self.budget),
+                self.suppressed
+            )
+        } else {
+            format!(
+                "concede: slow frame {:.1}ms (budget {:.0}ms)",
+                millis(elapsed),
+                millis(self.budget)
+            )
+        };
+        self.last_log = Some(now);
+        self.suppressed = 0;
+        Some(message)
+    }
+
+    /// Record a frame's build time and print any resulting log line.
+    fn record(&mut self, elapsed: Duration) {
+        if let Some(line) = self.record_at(elapsed, Instant::now()) {
+            eprintln!("{line}");
+        }
+    }
+}
+
+fn millis(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
+}
 
 /// One unreviewed decision in the list, flattened to owned strings.
 #[derive(Debug, Clone)]
@@ -687,6 +779,8 @@ struct ConcedeRoot {
     /// Scroll geometry is only known after the first layout, so we request one
     /// extra frame on startup to draw the scrollbars at their true sizes.
     primed: bool,
+    /// Frame-time instrumentation: warns when a render build exceeds the budget.
+    frame_stats: FrameStats,
 }
 
 impl ConcedeRoot {
@@ -708,6 +802,7 @@ impl ConcedeRoot {
             edit_scroll: ScrollHandle::new(),
             drag: None,
             primed: false,
+            frame_stats: FrameStats::from_env(),
         }
     }
 
@@ -942,6 +1037,9 @@ fn code_scroll_pool(data: &AppData) -> Vec<ScrollHandle> {
 
 impl Render for ConcedeRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Time the element-tree build; `frame_stats.record` (below) warns if it
+        // exceeds the 16 ms budget (ADR 0010).
+        let build_start = Instant::now();
         // Draw once more after the first layout, when scroll geometry is known.
         if !self.primed {
             self.primed = true;
@@ -1006,7 +1104,7 @@ impl Render for ConcedeRoot {
         } else {
             "ConcedeRoot"
         };
-        div()
+        let root = div()
             .track_focus(&self.focus)
             .key_context(key_context)
             .on_action(cx.listener(|this, _: &SelectNext, _window, cx| {
@@ -1092,7 +1190,10 @@ impl Render for ConcedeRoot {
                 }),
             )
             .child(header)
-            .child(body)
+            .child(body);
+
+        self.frame_stats.record(build_start.elapsed());
+        root
     }
 }
 
@@ -1818,6 +1919,51 @@ mod tests {
         assert_eq!((b.row, b.col), (1, 0));
         b.move_left(); // column 0: wraps to the end of the previous line
         assert_eq!((b.row, b.col), (0, 9));
+    }
+
+    #[test]
+    fn frame_stats_logs_breaches_and_throttles() {
+        let budget = Duration::from_millis(16);
+        let mut stats = FrameStats::new(budget, false);
+        let t0 = Instant::now();
+
+        // Under budget: nothing logged.
+        assert_eq!(stats.record_at(Duration::from_millis(8), t0), None);
+
+        // First breach logs.
+        let first = stats
+            .record_at(Duration::from_millis(20), t0)
+            .expect("first breach logs");
+        assert!(first.contains("slow frame"), "{first}");
+        assert!(!first.contains("more since"), "{first}");
+
+        // A second breach within the interval is suppressed...
+        assert_eq!(
+            stats.record_at(Duration::from_millis(25), t0 + Duration::from_millis(100)),
+            None
+        );
+        assert_eq!(
+            stats.record_at(Duration::from_millis(25), t0 + Duration::from_millis(200)),
+            None
+        );
+
+        // ...and the next breach after the interval reports the suppressed count.
+        let later = stats
+            .record_at(Duration::from_millis(30), t0 + FRAME_LOG_INTERVAL)
+            .expect("breach after the interval logs");
+        assert!(later.contains("+2 more since"), "{later}");
+    }
+
+    #[test]
+    fn frame_stats_trace_logs_every_frame() {
+        let mut stats = FrameStats::new(Duration::from_millis(16), true);
+        let t0 = Instant::now();
+        // Even a fast frame is reported in trace mode.
+        let line = stats
+            .record_at(Duration::from_millis(1), t0)
+            .expect("trace logs every frame");
+        assert!(line.contains("frame"), "{line}");
+        assert!(!line.contains("slow"), "{line}");
     }
 
     #[test]
