@@ -68,3 +68,30 @@ Deferred to a later phase (noted in the ADRs): a real code editor (LSP +
 tree-sitter), text selection/IME/mouse-caret and horizontal scroll in code mode,
 file cycling for multi-file decisions, logging human edits as decisions, and
 moving the synchronous log/file reads off the UI thread with file-watching.
+
+## Phase 3 — Change Stories ✅
+
+AI output is grouped by **intent**, not just session, and reviewed a story at a
+time (VISION pillar 3). See `docs/KICKOFF.md` "Later" / VISION.
+
+- **Model (ADR 0011)**: `Decision` gains an optional `intent` label (additive,
+  schema stays v1); `Log::stories()` groups decisions by recorded intent, falling
+  back to session then ungrouped — decisions sharing an intent group across
+  sessions. Each story carries its touched-file union and aggregate review state
+  (`StoryReview`/`StoryStatus`), ordered by earliest-touch. Dependency ordering,
+  boilerplate-collapsing and criticality highlighting are deferred (need code
+  facts / later engines).
+- **Capture**: `concede log --intent`, the same field in `log --stdin` JSON, and an
+  optional `intent` on the MCP `record_decision` tool.
+- **CLI**: `concede stories [--json]` — stories with status, decisions and files.
+- **App**: the inbox is grouped into stories (intent / session fallback) with a
+  status chip; **whole-story approve/reject** (`⇧A`/`⇧R` in vim, `⌃A`/`⌃R` in the
+  default keymap) reviews every unreviewed decision in the selected story at once.
+  Per-decision review, detail and code mode are unchanged.
+
+**Done-when, verified on macOS (2026-11-24):** in the sample repo, a decision
+tagged `--intent order-validation` forms its own story in both `concede stories`
+and the app, while untagged work falls back to session groups; approving part of a
+story shows a `N of M reviewed` status.
+
+~96 tests (`cargo test --workspace`), clippy and fmt clean.

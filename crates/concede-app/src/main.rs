@@ -11,6 +11,11 @@
 //! - step 5: code mode — one key opens the selected decision's file in a basic
 //!   editable view; edits save to disk explicitly, Esc discards and returns to the
 //!   same visual-mode spot. See ADR 0009.
+//!
+//! Phase 3:
+//! - step 3: the inbox is grouped into change stories (by recorded intent, falling
+//!   back to session), each with an aggregate-status chip, and the whole story can
+//!   be approved or rejected in one key. See ADR 0011.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -18,7 +23,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
 use concede_core::{
-    ChangeStore, Concede, Decision, MappedHunk, Mapping, PRODUCT_NAME, ReviewStatus, WhyRecord,
+    ChangeStore, Concede, Decision, MappedHunk, Mapping, PRODUCT_NAME, ReviewStatus, Story,
+    StoryKey, StoryStatus, WhyRecord,
 };
 use gpui::{
     App, Bounds, Context, FocusHandle, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -37,6 +43,8 @@ actions!(
         FocusList,
         Approve,
         Reject,
+        ApproveStory,
+        RejectStory,
         EnterCode,
         ExitCode,
         Save,
@@ -69,7 +77,8 @@ struct KeyConfig {
 ///   mode = vim | default
 ///   bind <action> = <keystroke>     e.g. `bind approve = shift-y`
 /// Actions: select_next, select_prev, focus_detail, focus_list, approve, reject,
-/// code (enter code mode), save (write the file in code mode).
+/// approve_story, reject_story (review the whole story), code (enter code mode),
+/// save (write the file in code mode).
 fn load_key_config() -> KeyConfig {
     let path = std::env::var_os("CONCEDE_KEYS")
         .map(PathBuf::from)
@@ -122,6 +131,8 @@ fn key_bindings(config: &KeyConfig) -> Vec<KeyBinding> {
             KeyBinding::new("escape", FocusList, CONTEXT),
             KeyBinding::new("a", Approve, CONTEXT),
             KeyBinding::new("r", Reject, CONTEXT),
+            KeyBinding::new("shift-a", ApproveStory, CONTEXT),
+            KeyBinding::new("shift-r", RejectStory, CONTEXT),
             KeyBinding::new("c", EnterCode, CONTEXT),
         ]
     } else {
@@ -132,6 +143,8 @@ fn key_bindings(config: &KeyConfig) -> Vec<KeyBinding> {
             KeyBinding::new("escape", FocusList, CONTEXT),
             KeyBinding::new("shift-a", Approve, CONTEXT),
             KeyBinding::new("shift-r", Reject, CONTEXT),
+            KeyBinding::new("ctrl-a", ApproveStory, CONTEXT),
+            KeyBinding::new("ctrl-r", RejectStory, CONTEXT),
             KeyBinding::new("c", EnterCode, CONTEXT),
         ]
     };
@@ -157,6 +170,8 @@ fn key_bindings(config: &KeyConfig) -> Vec<KeyBinding> {
             "focus_list" => KeyBinding::new(key, FocusList, CONTEXT),
             "approve" => KeyBinding::new(key, Approve, CONTEXT),
             "reject" => KeyBinding::new(key, Reject, CONTEXT),
+            "approve_story" => KeyBinding::new(key, ApproveStory, CONTEXT),
+            "reject_story" => KeyBinding::new(key, RejectStory, CONTEXT),
             "code" => KeyBinding::new(key, EnterCode, CONTEXT),
             "save" => KeyBinding::new(key, Save, CODE),
             _ => continue,
@@ -284,11 +299,36 @@ struct DecisionRow {
     files: String,
 }
 
-/// One agent session's unreviewed decisions.
+/// One change story's unreviewed decisions (ADR 0011).
 #[derive(Debug, Clone)]
-struct SessionRow {
+struct StoryRow {
     heading: String,
+    /// Aggregate review state, e.g. `unreviewed` or `2 of 5 reviewed`.
+    status: String,
     decisions: Vec<DecisionRow>,
+    /// Full ids of the unreviewed decisions here, for whole-story review.
+    ids: Vec<String>,
+}
+
+/// The heading for a story's group (its intent, or the session/ungrouped fallback).
+fn story_heading(key: StoryKey) -> String {
+    match key {
+        StoryKey::Intent(intent) => format!("Intent: {intent}"),
+        StoryKey::Session(session) => format!("Session {session}"),
+        StoryKey::Ungrouped => "Ungrouped".to_owned(),
+    }
+}
+
+/// A short aggregate-status label over a story's decisions (reviewed ones included).
+fn story_status_label(story: &Story) -> String {
+    match story.status() {
+        StoryStatus::Unreviewed => "unreviewed".to_owned(),
+        StoryStatus::Reviewed => "reviewed".to_owned(),
+        StoryStatus::Mixed => {
+            let done = story.review.approved + story.review.rejected;
+            format!("{done} of {} reviewed", story.review.total())
+        }
+    }
 }
 
 /// One line of source in the detail pane's code view.
@@ -325,7 +365,7 @@ struct DecisionDetail {
 /// cannot borrow from the `Log` the way `concede_core::Inbox` does.
 #[derive(Debug, Clone, Default)]
 struct AppData {
-    sessions: Vec<SessionRow>,
+    stories: Vec<StoryRow>,
     /// Flat, in list order, so the selected index addresses both.
     details: Vec<DecisionDetail>,
     unexplained: usize,
@@ -560,39 +600,49 @@ fn load_app(root: &Path) -> AppData {
         }
     };
 
-    let inbox = loaded.log.inbox();
-    let mut sessions = Vec::with_capacity(inbox.sessions.len());
+    // Group all decisions into change stories (ADR 0011), but keep the review-queue
+    // behaviour: show only stories with unreviewed work, listing their unreviewed
+    // decisions, so reviewing empties the inbox as before.
+    let log = &loaded.log;
+    let mut stories = Vec::new();
     let mut details = Vec::new();
 
-    for group in &inbox.sessions {
-        let tools: BTreeSet<String> = group.decisions.iter().map(|d| agent_label(d)).collect();
-        let tools = tools.into_iter().collect::<Vec<_>>().join(", ");
-        let heading = match group.session {
-            Some(session) => format!("Session {session}  ({tools})"),
-            None => format!("No session  ({tools})"),
-        };
+    for story in &log.stories() {
+        let unreviewed: Vec<&Decision> = story
+            .decisions
+            .iter()
+            .copied()
+            .filter(|d| log.state(&d.id).review == ReviewStatus::Unreviewed)
+            .collect();
+        if unreviewed.is_empty() {
+            continue;
+        }
 
-        let mut rows = Vec::with_capacity(group.decisions.len());
-        for d in &group.decisions {
+        let mut rows = Vec::with_capacity(unreviewed.len());
+        let mut ids = Vec::with_capacity(unreviewed.len());
+        for d in &unreviewed {
             rows.push(DecisionRow {
                 short_id: short_id(&d.id.to_string()),
                 when: local(&d.timestamp),
                 task: d.task.clone(),
                 files: files_label(d),
             });
+            ids.push(d.id.to_string());
             details.push(build_detail(&concede, &repo_root, d));
         }
 
-        sessions.push(SessionRow {
-            heading,
+        stories.push(StoryRow {
+            heading: story_heading(story.key),
+            status: story_status_label(story),
             decisions: rows,
+            ids,
         });
     }
 
     AppData {
-        sessions,
+        stories,
         details,
-        unexplained: inbox.unexplained.len(),
+        unexplained: log.inbox().unexplained.len(),
         message: None,
     }
 }
@@ -849,15 +899,27 @@ impl ConcedeRoot {
     fn list_child_index(&self, flat: usize) -> usize {
         let mut remaining = flat;
         let mut child = 0;
-        for session in &self.data.sessions {
-            child += 1; // the session heading
-            if remaining < session.decisions.len() {
+        for story in &self.data.stories {
+            child += 1; // the story heading
+            if remaining < story.decisions.len() {
                 return child + remaining;
             }
-            remaining -= session.decisions.len();
-            child += session.decisions.len();
+            remaining -= story.decisions.len();
+            child += story.decisions.len();
         }
         child
+    }
+
+    /// The story the flat decision index `flat` belongs to.
+    fn story_of(&self, flat: usize) -> Option<&StoryRow> {
+        let mut remaining = flat;
+        for story in &self.data.stories {
+            if remaining < story.decisions.len() {
+                return Some(story);
+            }
+            remaining -= story.decisions.len();
+        }
+        None
     }
 
     /// Scroll the detail pane by `delta` pixels (positive is down).
@@ -874,9 +936,27 @@ impl ConcedeRoot {
         let Some(detail) = self.data.details.get(self.selected) else {
             return;
         };
+        // Clone the id out first: `review_ids` takes `&mut self`, so it can't hold a
+        // borrow into `self.data`.
         let id = detail.id.clone();
+        self.review_ids(std::slice::from_ref(&id), status);
+    }
+
+    /// Review every unreviewed decision in the selected decision's story at once
+    /// ("accept or reject per group", ADR 0011), then reload.
+    fn review_story(&mut self, status: ReviewStatus) {
+        let Some(ids) = self.story_of(self.selected).map(|s| s.ids.clone()) else {
+            return;
+        };
+        self.review_ids(&ids, status);
+    }
+
+    /// Apply `status` to each id, then reload the inbox and clamp the selection.
+    fn review_ids(&mut self, ids: &[String], status: ReviewStatus) {
         if let Ok(concede) = Concede::discover(&self.root) {
-            let _ = concede.review(&id, status, None, None);
+            for id in ids {
+                let _ = concede.review(id, status, None, None);
+            }
         }
         self.data = load_app(&self.root);
         self.code_scrolls = code_scroll_pool(&self.data);
@@ -1054,9 +1134,9 @@ impl Render for ConcedeRoot {
         let hint = if self.code.is_some() {
             "editing · type to change · ⌘S save · esc discard & back"
         } else if self.vim {
-            "j/k move · l detail · h list · a/r review · c edit"
+            "j/k move · l detail · h list · a/r review · ⇧A/⇧R story · c edit"
         } else {
-            "↑/↓ move · enter detail · esc list · ⇧A/⇧R review · c edit"
+            "↑/↓ move · enter detail · esc list · ⇧A/⇧R review · ⌃A/⌃R story · c edit"
         };
         let header = div()
             .flex()
@@ -1129,6 +1209,14 @@ impl Render for ConcedeRoot {
             }))
             .on_action(cx.listener(|this, _: &Reject, _window, cx| {
                 this.review(ReviewStatus::Rejected);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ApproveStory, _window, cx| {
+                this.review_story(ReviewStatus::Approved);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &RejectStory, _window, cx| {
+                this.review_story(ReviewStatus::Rejected);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EnterCode, window, cx| {
@@ -1207,16 +1295,24 @@ impl ConcedeRoot {
         // the selected row into view (see `list_child_index`).
         let mut children: Vec<gpui::AnyElement> = Vec::new();
 
-        for (s, session) in self.data.sessions.iter().enumerate() {
+        for (s, story) in self.data.stories.iter().enumerate() {
             children.push(
                 div()
+                    .flex()
+                    .items_baseline()
+                    .gap_2()
                     .text_sm()
                     .text_color(rgb(MUTED))
                     .when(s > 0, |d| d.pt_2())
-                    .child(session.heading.clone())
+                    .child(div().child(story.heading.clone()))
+                    .child(
+                        div()
+                            .text_color(rgb(FAINT))
+                            .child(format!("· {}", story.status)),
+                    )
                     .into_any_element(),
             );
-            for row in &session.decisions {
+            for row in &story.decisions {
                 let index = flat;
                 flat += 1;
                 children.push(
