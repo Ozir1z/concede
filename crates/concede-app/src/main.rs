@@ -7,8 +7,10 @@
 //!   lines highlighted (ranges mapped onto the current file via `why`).
 //!   Draggable scrollbars: vertical on the list and detail panes, horizontal on
 //!   each code block (lines don't wrap).
-//!
-//! Selection is by click for now; keyboard navigation comes in a later step.
+//! - step 4: keyboard-first navigation, review, and a configurable keymap.
+//! - step 5: code mode — one key opens the selected decision's file in a basic
+//!   editable view; edits save to disk explicitly, Esc discards and returns to the
+//!   same visual-mode spot. See ADR 0009.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -18,9 +20,9 @@ use concede_core::{
     ChangeStore, Concede, Decision, MappedHunk, Mapping, PRODUCT_NAME, ReviewStatus, WhyRecord,
 };
 use gpui::{
-    App, Bounds, Context, FocusHandle, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ScrollHandle, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    actions, div, point, prelude::*, px, rgb, size,
+    App, Bounds, Context, FocusHandle, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ScrollHandle, SharedString, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, actions, div, point, prelude::*, px, rgb, size,
 };
 
 // Keyboard actions, dispatched to the root view. Names become e.g.
@@ -33,15 +35,21 @@ actions!(
         FocusDetail,
         FocusList,
         Approve,
-        Reject
+        Reject,
+        EnterCode,
+        ExitCode,
+        Save,
+        Paste
     ]
 );
 
-/// Which pane the keyboard drives: moving the selection, or scrolling the detail.
+/// Which area the keyboard drives: moving the selection, scrolling the detail, or
+/// editing the file in code mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusArea {
     List,
     Detail,
+    Code,
 }
 
 /// Keyboard configuration: which preset, plus any per-action overrides from the
@@ -59,7 +67,8 @@ struct KeyConfig {
 /// Format (one per line, `#` comments):
 ///   mode = vim | default
 ///   bind <action> = <keystroke>     e.g. `bind approve = shift-y`
-/// Actions: select_next, select_prev, focus_detail, focus_list, approve, reject.
+/// Actions: select_next, select_prev, focus_detail, focus_list, approve, reject,
+/// code (enter code mode), save (write the file in code mode).
 fn load_key_config() -> KeyConfig {
     let path = std::env::var_os("CONCEDE_KEYS")
         .map(PathBuf::from)
@@ -112,6 +121,7 @@ fn key_bindings(config: &KeyConfig) -> Vec<KeyBinding> {
             KeyBinding::new("escape", FocusList, CONTEXT),
             KeyBinding::new("a", Approve, CONTEXT),
             KeyBinding::new("r", Reject, CONTEXT),
+            KeyBinding::new("c", EnterCode, CONTEXT),
         ]
     } else {
         vec![
@@ -121,8 +131,21 @@ fn key_bindings(config: &KeyConfig) -> Vec<KeyBinding> {
             KeyBinding::new("escape", FocusList, CONTEXT),
             KeyBinding::new("shift-a", Approve, CONTEXT),
             KeyBinding::new("shift-r", Reject, CONTEXT),
+            KeyBinding::new("c", EnterCode, CONTEXT),
         ]
     };
+
+    // Code mode runs under its own key context so the single-letter visual-mode
+    // binds above (a, j/k, …) don't fire while typing; see ADR 0009. Only these
+    // few keys are bound there — every other key reaches the editor as text input.
+    const CODE: Option<&str> = Some("ConcedeCode");
+    binds.extend([
+        KeyBinding::new("escape", ExitCode, CODE),
+        KeyBinding::new("cmd-s", Save, CODE),
+        KeyBinding::new("ctrl-s", Save, CODE),
+        KeyBinding::new("cmd-v", Paste, CODE),
+        KeyBinding::new("ctrl-v", Paste, CODE),
+    ]);
 
     for (action, key) in &config.overrides {
         let key: &'static str = Box::leak(key.clone().into_boxed_str());
@@ -133,6 +156,8 @@ fn key_bindings(config: &KeyConfig) -> Vec<KeyBinding> {
             "focus_list" => KeyBinding::new(key, FocusList, CONTEXT),
             "approve" => KeyBinding::new(key, Approve, CONTEXT),
             "reject" => KeyBinding::new(key, Reject, CONTEXT),
+            "code" => KeyBinding::new(key, EnterCode, CONTEXT),
+            "save" => KeyBinding::new(key, Save, CODE),
             _ => continue,
         };
         binds.push(bind);
@@ -237,6 +262,174 @@ struct Drag {
     usable: f32,
     /// Maximum scroll distance (content length minus viewport).
     max: f32,
+}
+
+/// A minimal editable text buffer for code mode (ADR 0009): the file split into
+/// `lines`, plus a caret at (`row`, `col`). `col` is a **character** index within
+/// the row (not a byte offset), so edits stay correct on multi-byte UTF-8 lines.
+/// All editing logic lives here, pure and unit-tested; the view only renders it
+/// and feeds it key events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditBuffer {
+    lines: Vec<String>,
+    row: usize,
+    col: usize,
+}
+
+impl EditBuffer {
+    /// Split text into lines. `"a\nb"` → `["a", "b"]`; `"a\n"` → `["a", ""]`;
+    /// `""` → `[""]`. Always holds at least one line, so `lines[row]` is safe.
+    fn from_str(text: &str) -> Self {
+        let lines = if text.is_empty() {
+            vec![String::new()]
+        } else {
+            text.split('\n').map(str::to_owned).collect()
+        };
+        Self {
+            lines,
+            row: 0,
+            col: 0,
+        }
+    }
+
+    /// Reassemble the buffer into file text (the inverse of [`from_str`]).
+    fn text(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    /// Characters in the given row.
+    fn row_len(&self, row: usize) -> usize {
+        self.lines[row].chars().count()
+    }
+
+    /// The byte offset of character index `col` within `line` (its end if `col`
+    /// is past the last character), for splicing into the `String`.
+    fn byte_of(line: &str, col: usize) -> usize {
+        line.char_indices()
+            .nth(col)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len())
+    }
+
+    /// Keep `col` within the current row (after a vertical move onto a shorter row).
+    fn clamp_col(&mut self) {
+        self.col = self.col.min(self.row_len(self.row));
+    }
+
+    /// Place the caret, clamped to the buffer.
+    fn place_at(&mut self, row: usize, col: usize) {
+        self.row = row.min(self.lines.len() - 1);
+        self.col = col.min(self.row_len(self.row));
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        let at = Self::byte_of(&self.lines[self.row], self.col);
+        self.lines[self.row].insert(at, ch);
+        self.col += 1;
+    }
+
+    /// Insert arbitrary text (e.g. a clipboard paste), honouring embedded newlines
+    /// and dropping `\r` so pasted CRLF text doesn't leave stray carriage returns.
+    fn insert_str(&mut self, text: &str) {
+        for ch in text.chars() {
+            match ch {
+                '\n' => self.insert_newline(),
+                '\r' => {}
+                _ => self.insert_char(ch),
+            }
+        }
+    }
+
+    fn insert_newline(&mut self) {
+        let at = Self::byte_of(&self.lines[self.row], self.col);
+        let rest = self.lines[self.row].split_off(at);
+        self.lines.insert(self.row + 1, rest);
+        self.row += 1;
+        self.col = 0;
+    }
+
+    /// Delete the character before the caret, or merge with the previous line.
+    fn backspace(&mut self) {
+        if self.col > 0 {
+            let prev = self.col - 1;
+            let at = Self::byte_of(&self.lines[self.row], prev);
+            self.lines[self.row].remove(at);
+            self.col = prev;
+        } else if self.row > 0 {
+            let line = self.lines.remove(self.row);
+            self.row -= 1;
+            self.col = self.row_len(self.row);
+            self.lines[self.row].push_str(&line);
+        }
+    }
+
+    /// Delete the character at the caret, or merge the next line onto this one.
+    fn delete(&mut self) {
+        if self.col < self.row_len(self.row) {
+            let at = Self::byte_of(&self.lines[self.row], self.col);
+            self.lines[self.row].remove(at);
+        } else if self.row + 1 < self.lines.len() {
+            let next = self.lines.remove(self.row + 1);
+            self.lines[self.row].push_str(&next);
+        }
+    }
+
+    fn move_left(&mut self) {
+        if self.col > 0 {
+            self.col -= 1;
+        } else if self.row > 0 {
+            self.row -= 1;
+            self.col = self.row_len(self.row);
+        }
+    }
+
+    fn move_right(&mut self) {
+        if self.col < self.row_len(self.row) {
+            self.col += 1;
+        } else if self.row + 1 < self.lines.len() {
+            self.row += 1;
+            self.col = 0;
+        }
+    }
+
+    fn move_up(&mut self) {
+        if self.row > 0 {
+            self.row -= 1;
+            self.clamp_col();
+        }
+    }
+
+    fn move_down(&mut self) {
+        if self.row + 1 < self.lines.len() {
+            self.row += 1;
+            self.clamp_col();
+        }
+    }
+
+    fn move_home(&mut self) {
+        self.col = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.col = self.row_len(self.row);
+    }
+}
+
+/// Code mode: one file open in the editable buffer. The buffer is the whole file
+/// (ADR 0009); `highlights` are the decision's changed line numbers, still marked.
+struct CodeMode {
+    /// Absolute path, written on save.
+    path: PathBuf,
+    /// Repo-relative path, for the header.
+    rel: String,
+    buffer: EditBuffer,
+    highlights: BTreeSet<u32>,
+    /// Unsaved edits since the last save (or since opening).
+    dirty: bool,
+    /// Last save result, shown in the header (e.g. `saved 14:03:07`).
+    status: Option<String>,
+    /// The visual area to return to on Esc.
+    return_area: FocusArea,
 }
 
 /// Read the decision log at `root` and build both the list rows and the per-decision
@@ -472,14 +665,21 @@ struct ConcedeRoot {
     data: AppData,
     /// Flat index of the selected decision across all sessions.
     selected: usize,
-    /// Which pane the keyboard drives.
+    /// Which area the keyboard drives.
     focus_area: FocusArea,
+    /// Present while editing a file in code mode (ADR 0009).
+    code: Option<CodeMode>,
     /// Whether the vim keymap is active (for the header hint).
     vim: bool,
     focus: FocusHandle,
+    /// Focused while in code mode, so the editor receives key events.
+    code_focus: FocusHandle,
     focused_once: bool,
     list_scroll: ScrollHandle,
     detail_scroll: ScrollHandle,
+    /// The code-mode editor's vertical scroll (reused across entries, per the
+    /// no-recreate-under-same-id gotcha).
+    edit_scroll: ScrollHandle,
     /// One per file of the selected decision (for horizontal code scrolling).
     code_scrolls: Vec<ScrollHandle>,
     /// The scrollbar drag in progress, if any.
@@ -498,11 +698,14 @@ impl ConcedeRoot {
             data,
             selected: 0,
             focus_area: FocusArea::List,
+            code: None,
             vim,
             focus: cx.focus_handle(),
+            code_focus: cx.focus_handle(),
             focused_once: false,
             list_scroll: ScrollHandle::new(),
             detail_scroll: ScrollHandle::new(),
+            edit_scroll: ScrollHandle::new(),
             drag: None,
             primed: false,
         }
@@ -533,6 +736,8 @@ impl ConcedeRoot {
         match self.focus_area {
             FocusArea::List => self.select(self.selected.saturating_add(1)),
             FocusArea::Detail => self.scroll_detail(60.0),
+            // Code mode runs under its own key context, so these never reach it.
+            FocusArea::Code => {}
         }
     }
 
@@ -540,6 +745,7 @@ impl ConcedeRoot {
         match self.focus_area {
             FocusArea::List => self.select(self.selected.saturating_sub(1)),
             FocusArea::Detail => self.scroll_detail(-60.0),
+            FocusArea::Code => {}
         }
     }
 
@@ -583,6 +789,141 @@ impl ConcedeRoot {
         self.focus_area = FocusArea::List;
         self.primed = false;
     }
+
+    /// Enter code mode on the selected decision's first on-disk file (ADR 0009),
+    /// caret on its first changed line. Returns whether a file was opened (nothing
+    /// to edit — no readable file — is a no-op).
+    fn enter_code(&mut self) -> bool {
+        let Some(detail) = self.data.details.get(self.selected) else {
+            return false;
+        };
+        let Some(file) = detail.files.iter().find(|f| f.note.is_none()) else {
+            return false;
+        };
+        let path = self.root.join(&file.path);
+        // Read fresh from disk rather than reconstructing from the display rows
+        // (which pad blank lines); this is the exact text we'll edit and save.
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        let highlights: BTreeSet<u32> = file
+            .code
+            .iter()
+            .filter(|line| line.highlighted)
+            .map(|line| line.number)
+            .collect();
+
+        let mut buffer = EditBuffer::from_str(&text);
+        if let Some(&first) = highlights.iter().next() {
+            buffer.place_at((first as usize).saturating_sub(1), 0);
+        }
+
+        self.edit_scroll.set_offset(point(px(0.0), px(0.0)));
+        self.code = Some(CodeMode {
+            path,
+            rel: file.path.clone(),
+            buffer,
+            highlights,
+            dirty: false,
+            status: None,
+            return_area: self.focus_area,
+        });
+        self.focus_area = FocusArea::Code;
+        self.primed = false;
+        true
+    }
+
+    /// Leave code mode, discarding any unsaved edits, back to the exact spot we
+    /// entered from (selection and scroll are untouched by code mode).
+    fn exit_code(&mut self) {
+        if let Some(code) = self.code.take() {
+            self.focus_area = code.return_area;
+        }
+        self.primed = false;
+    }
+
+    /// Write the buffer to disk. A human edit isn't logged as a decision yet
+    /// (future work, ADR 0009); this just updates the working tree.
+    fn save_code(&mut self) {
+        if let Some(code) = &mut self.code {
+            match std::fs::write(&code.path, code.buffer.text()) {
+                Ok(()) => {
+                    code.dirty = false;
+                    code.status = Some(format!("saved {}", Local::now().format("%H:%M:%S")));
+                }
+                Err(error) => code.status = Some(format!("save failed: {error}")),
+            }
+        }
+    }
+
+    /// Insert the clipboard text at the caret.
+    fn paste_code(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        if let Some(code) = &mut self.code {
+            code.buffer.insert_str(&text);
+            code.dirty = true;
+        }
+    }
+
+    /// Apply one key press to the editable buffer. Returns whether anything
+    /// changed (so the caller only requests a frame when needed). Keys bound as
+    /// actions in the `ConcedeCode` context (Esc, save, paste) never arrive here.
+    fn edit_key(&mut self, ev: &KeyDownEvent) -> bool {
+        let Some(code) = self.code.as_mut() else {
+            return false;
+        };
+        let modifiers = ev.keystroke.modifiers;
+        // Caret moves redraw (to follow the caret) but don't dirty the buffer.
+        let mut edited = true;
+        match ev.keystroke.key.as_str() {
+            "backspace" => code.buffer.backspace(),
+            "delete" => code.buffer.delete(),
+            "enter" => code.buffer.insert_newline(),
+            "tab" => code.buffer.insert_str("    "),
+            "left" => {
+                code.buffer.move_left();
+                edited = false;
+            }
+            "right" => {
+                code.buffer.move_right();
+                edited = false;
+            }
+            "up" => {
+                code.buffer.move_up();
+                edited = false;
+            }
+            "down" => {
+                code.buffer.move_down();
+                edited = false;
+            }
+            "home" => {
+                code.buffer.move_home();
+                edited = false;
+            }
+            "end" => {
+                code.buffer.move_end();
+                edited = false;
+            }
+            _ => {
+                // A typed character: use the char the key would produce, but skip
+                // when a command/control/function modifier is down (those are
+                // shortcuts, not text).
+                if modifiers.control || modifiers.platform || modifiers.function {
+                    return false;
+                }
+                match ev.keystroke.key_char.as_deref() {
+                    Some(text) if !text.is_empty() => code.buffer.insert_str(text),
+                    _ => return false,
+                }
+            }
+        }
+        if edited {
+            code.dirty = true;
+        }
+        true
+    }
 }
 
 /// A stable pool of code scroll handles, one per file slot, sized to the decision
@@ -612,10 +953,12 @@ impl Render for ConcedeRoot {
             window.focus(&self.focus, cx);
         }
 
-        let hint = if self.vim {
-            "j/k move · l detail · h list · a/r review"
+        let hint = if self.code.is_some() {
+            "editing · type to change · ⌘S save · esc discard & back"
+        } else if self.vim {
+            "j/k move · l detail · h list · a/r review · c edit"
         } else {
-            "↑/↓ move · enter detail · esc list · ⇧A/⇧R review"
+            "↑/↓ move · enter detail · esc list · ⇧A/⇧R review · c edit"
         };
         let header = div()
             .flex()
@@ -639,7 +982,9 @@ impl Render for ConcedeRoot {
             .child(div().flex_1())
             .child(div().text_sm().text_color(rgb(FAINT)).child(hint));
 
-        let body = if let Some(message) = &self.data.message {
+        let body = if self.code.is_some() {
+            self.code_pane(cx)
+        } else if let Some(message) = &self.data.message {
             centered_message(message.clone())
         } else if self.data.total() == 0 {
             centered_message("Inbox zero: nothing to review.".to_owned())
@@ -654,9 +999,16 @@ impl Render for ConcedeRoot {
                 .into_any_element()
         };
 
+        // In code mode the root advertises a different key context so the
+        // single-letter visual-mode binds don't fire while typing (ADR 0009).
+        let key_context = if self.code.is_some() {
+            "ConcedeCode"
+        } else {
+            "ConcedeRoot"
+        };
         div()
             .track_focus(&self.focus)
-            .key_context("ConcedeRoot")
+            .key_context(key_context)
             .on_action(cx.listener(|this, _: &SelectNext, _window, cx| {
                 this.select_next();
                 cx.notify();
@@ -679,6 +1031,25 @@ impl Render for ConcedeRoot {
             }))
             .on_action(cx.listener(|this, _: &Reject, _window, cx| {
                 this.review(ReviewStatus::Rejected);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EnterCode, window, cx| {
+                if this.enter_code() {
+                    window.focus(&this.code_focus, cx);
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ExitCode, window, cx| {
+                this.exit_code();
+                window.focus(&this.focus, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Save, _window, cx| {
+                this.save_code();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Paste, _window, cx| {
+                this.paste_code(cx);
                 cx.notify();
             }))
             .flex()
@@ -885,6 +1256,122 @@ impl ConcedeRoot {
             .child(content)
             .children(vertical_scrollbar(&self.detail_scroll, cx))
             .children(focus_strip(focused))
+            .into_any_element()
+    }
+
+    /// The code-mode editor: a header (file, dirty/save state) and the whole file
+    /// as editable, vertically scrollable lines with a caret. Replaces the split
+    /// while editing; Esc returns to it.
+    fn code_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let code = self.code.as_ref().expect("code_pane with code mode active");
+
+        let (state_text, state_color) = if code.dirty {
+            ("edited".to_owned(), ACCENT)
+        } else {
+            (code.status.clone().unwrap_or_default(), MUTED)
+        };
+        let subhead = div()
+            .flex()
+            .items_baseline()
+            .gap_3()
+            .px_4()
+            .py_2()
+            .border_b_1()
+            .border_color(rgb(DIVIDER))
+            .child(div().text_color(rgb(ACCENT)).child(code.rel.clone()))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(state_color))
+                    .child(state_text),
+            );
+
+        let caret_row = code.buffer.row;
+        let rows = code.buffer.lines.iter().enumerate().map(|(i, line)| {
+            let number = i as u32 + 1;
+            let gutter = div()
+                .flex_none()
+                .w(px(44.0))
+                .text_color(rgb(FAINT))
+                .child(format!("{:>4}", number));
+
+            let text_el = if i == caret_row {
+                // Split the line at the caret (by character index) and drop a thin
+                // bar between the two halves, so it sits at the real glyph boundary
+                // regardless of font metrics.
+                let chars: Vec<char> = line.chars().collect();
+                let col = code.buffer.col.min(chars.len());
+                let before: String = chars[..col].iter().collect();
+                let after: String = chars[col..].iter().collect();
+                div()
+                    .flex()
+                    .items_center()
+                    .whitespace_nowrap()
+                    .text_color(rgb(TEXT))
+                    .child(before)
+                    .child(div().w(px(2.0)).h(px(16.0)).bg(rgb(ACCENT)))
+                    .child(after)
+            } else {
+                div()
+                    .whitespace_nowrap()
+                    .text_color(rgb(TEXT))
+                    // Keep blank lines at a row's height.
+                    .child(if line.is_empty() {
+                        " ".to_owned()
+                    } else {
+                        line.clone()
+                    })
+            };
+
+            div()
+                .id(("edit-line", i))
+                .flex()
+                .gap_3()
+                .when(code.highlights.contains(&number), |row| {
+                    row.bg(rgb(CODE_HIGHLIGHT))
+                })
+                .child(gutter)
+                .child(text_el)
+        });
+
+        let editor = div()
+            .id("code-editor")
+            .track_focus(&self.code_focus)
+            .flex()
+            .flex_col()
+            .size_full()
+            .p_3()
+            .text_sm()
+            .overflow_y_scroll()
+            .track_scroll(&self.edit_scroll)
+            .on_scroll(cx.listener(|_this, _ev, _window, cx| cx.notify()))
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+                if this.edit_key(ev) {
+                    // Keep the caret's line on screen (its row is a direct child).
+                    if let Some(code) = &this.code {
+                        this.edit_scroll.scroll_to_item(code.buffer.row);
+                    }
+                    cx.notify();
+                }
+            }))
+            .children(rows);
+
+        let wrapper = div()
+            .relative()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .child(editor)
+            .children(vertical_scrollbar(&self.edit_scroll, cx));
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(subhead)
+            .child(wrapper)
             .into_any_element()
     }
 }
@@ -1258,5 +1745,90 @@ mod tests {
         assert_eq!(lines[1].text, " "); // blank line kept non-empty
         assert!(lines[1].highlighted);
         assert_eq!(lines[2].text, "c");
+    }
+
+    #[test]
+    fn edit_buffer_round_trips_text() {
+        for text in [
+            "",
+            "one line",
+            "a\nb\nc",
+            "trailing\n",
+            "\nleading",
+            "a\n\nb",
+        ] {
+            assert_eq!(EditBuffer::from_str(text).text(), text);
+        }
+        // Always at least one line, so indexing lines[row] is safe.
+        assert_eq!(EditBuffer::from_str("").lines, vec![String::new()]);
+    }
+
+    #[test]
+    fn edit_buffer_inserts_and_splits_lines() {
+        let mut b = EditBuffer::from_str("ac");
+        b.place_at(0, 1);
+        b.insert_char('b');
+        assert_eq!(b.text(), "abc");
+        assert_eq!((b.row, b.col), (0, 2));
+
+        b.insert_newline();
+        assert_eq!(b.text(), "ab\nc");
+        assert_eq!((b.row, b.col), (1, 0));
+    }
+
+    #[test]
+    fn edit_buffer_backspace_merges_and_deletes() {
+        // Backspace at column 0 merges with the previous line.
+        let mut b = EditBuffer::from_str("ab\ncd");
+        b.place_at(1, 0);
+        b.backspace();
+        assert_eq!(b.text(), "abcd");
+        assert_eq!((b.row, b.col), (0, 2));
+
+        // Backspace mid-line deletes the char before the caret.
+        b.backspace();
+        assert_eq!(b.text(), "acd");
+        assert_eq!((b.row, b.col), (0, 1));
+
+        // Delete at end-of-line merges the next line onto this one.
+        let mut b = EditBuffer::from_str("ab\ncd");
+        b.place_at(0, 2);
+        b.delete();
+        assert_eq!(b.text(), "abcd");
+        assert_eq!((b.row, b.col), (0, 2));
+    }
+
+    #[test]
+    fn edit_buffer_paste_honours_newlines_and_drops_cr() {
+        let mut b = EditBuffer::from_str("");
+        b.insert_str("x\r\ny");
+        assert_eq!(b.text(), "x\ny");
+        assert_eq!((b.row, b.col), (1, 1));
+    }
+
+    #[test]
+    fn edit_buffer_moves_clamp_to_shorter_rows() {
+        let mut b = EditBuffer::from_str("long line\nhi");
+        b.place_at(0, 9); // end of the long line
+        b.move_down(); // onto the short line: column clamps to its length
+        assert_eq!((b.row, b.col), (1, 2));
+        b.move_right(); // at end of last line: no wrap past the buffer
+        assert_eq!((b.row, b.col), (1, 2));
+        b.move_home();
+        assert_eq!((b.row, b.col), (1, 0));
+        b.move_left(); // column 0: wraps to the end of the previous line
+        assert_eq!((b.row, b.col), (0, 9));
+    }
+
+    #[test]
+    fn edit_buffer_edits_multibyte_lines_by_char() {
+        // "café" — the accented char is multi-byte; caret is a char index, so a
+        // backspace after it must not split a UTF-8 boundary.
+        let mut b = EditBuffer::from_str("café");
+        b.place_at(0, 4);
+        b.backspace();
+        assert_eq!(b.text(), "caf");
+        b.insert_str("é!");
+        assert_eq!(b.text(), "café!");
     }
 }
