@@ -14,12 +14,131 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local, Utc};
-use concede_core::{ChangeStore, Concede, Decision, MappedHunk, Mapping, PRODUCT_NAME, WhyRecord};
-use gpui::{
-    App, Bounds, Context, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollHandle,
-    SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, div, point, prelude::*, px,
-    rgb, size,
+use concede_core::{
+    ChangeStore, Concede, Decision, MappedHunk, Mapping, PRODUCT_NAME, ReviewStatus, WhyRecord,
 };
+use gpui::{
+    App, Bounds, Context, FocusHandle, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ScrollHandle, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    actions, div, point, prelude::*, px, rgb, size,
+};
+
+// Keyboard actions, dispatched to the root view. Names become e.g.
+// `concede::SelectNext`; the keymap binds keystrokes to them.
+actions!(
+    concede,
+    [
+        SelectNext,
+        SelectPrev,
+        FocusDetail,
+        FocusList,
+        Approve,
+        Reject
+    ]
+);
+
+/// Which pane the keyboard drives: moving the selection, or scrolling the detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusArea {
+    List,
+    Detail,
+}
+
+/// Keyboard configuration: which preset, plus any per-action overrides from the
+/// config file. See [`load_key_config`].
+#[derive(Debug, Clone, Default)]
+struct KeyConfig {
+    vim: bool,
+    /// `(action name, keystroke)` pairs added on top of the preset.
+    overrides: Vec<(String, String)>,
+}
+
+/// Load the keymap config. Looked up at `$CONCEDE_KEYS`, else
+/// `$HOME/.config/concede/keymap.conf`. Missing file → built-in defaults.
+///
+/// Format (one per line, `#` comments):
+///   mode = vim | default
+///   bind <action> = <keystroke>     e.g. `bind approve = shift-y`
+/// Actions: select_next, select_prev, focus_detail, focus_list, approve, reject.
+fn load_key_config() -> KeyConfig {
+    let path = std::env::var_os("CONCEDE_KEYS")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".config/concede/keymap.conf"))
+        });
+    let Some(path) = path else {
+        return KeyConfig::default();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return KeyConfig::default();
+    };
+
+    let mut config = KeyConfig::default();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("bind ") {
+            if let Some((action, key)) = rest.split_once('=') {
+                config
+                    .overrides
+                    .push((action.trim().to_owned(), key.trim().to_owned()));
+            }
+        } else if let Some((key, value)) = line.split_once('=')
+            && key.trim() == "mode"
+        {
+            config.vim = value.trim().eq_ignore_ascii_case("vim");
+        }
+    }
+    config
+}
+
+/// Build the key bindings from the config: a preset (default or vim) plus any
+/// overrides. Keystrokes must be `'static`, so overridden ones are leaked (they
+/// live for the whole app run anyway).
+fn key_bindings(config: &KeyConfig) -> Vec<KeyBinding> {
+    const CONTEXT: Option<&str> = Some("ConcedeRoot");
+    let mut binds: Vec<KeyBinding> = if config.vim {
+        vec![
+            KeyBinding::new("j", SelectNext, CONTEXT),
+            KeyBinding::new("k", SelectPrev, CONTEXT),
+            KeyBinding::new("down", SelectNext, CONTEXT),
+            KeyBinding::new("up", SelectPrev, CONTEXT),
+            KeyBinding::new("l", FocusDetail, CONTEXT),
+            KeyBinding::new("enter", FocusDetail, CONTEXT),
+            KeyBinding::new("h", FocusList, CONTEXT),
+            KeyBinding::new("escape", FocusList, CONTEXT),
+            KeyBinding::new("a", Approve, CONTEXT),
+            KeyBinding::new("r", Reject, CONTEXT),
+        ]
+    } else {
+        vec![
+            KeyBinding::new("down", SelectNext, CONTEXT),
+            KeyBinding::new("up", SelectPrev, CONTEXT),
+            KeyBinding::new("enter", FocusDetail, CONTEXT),
+            KeyBinding::new("escape", FocusList, CONTEXT),
+            KeyBinding::new("shift-a", Approve, CONTEXT),
+            KeyBinding::new("shift-r", Reject, CONTEXT),
+        ]
+    };
+
+    for (action, key) in &config.overrides {
+        let key: &'static str = Box::leak(key.clone().into_boxed_str());
+        let bind = match action.as_str() {
+            "select_next" => KeyBinding::new(key, SelectNext, CONTEXT),
+            "select_prev" => KeyBinding::new(key, SelectPrev, CONTEXT),
+            "focus_detail" => KeyBinding::new(key, FocusDetail, CONTEXT),
+            "focus_list" => KeyBinding::new(key, FocusList, CONTEXT),
+            "approve" => KeyBinding::new(key, Approve, CONTEXT),
+            "reject" => KeyBinding::new(key, Reject, CONTEXT),
+            _ => continue,
+        };
+        binds.push(bind);
+    }
+    binds
+}
 
 // A small dark palette. Colours live here so later steps (and a light theme) have
 // one place to change.
@@ -76,6 +195,8 @@ struct FileDetail {
 /// The full, owned detail for one decision, shown on the right when selected.
 #[derive(Debug, Clone)]
 struct DecisionDetail {
+    /// The decision's full id, for the review call.
+    id: String,
     task: String,
     meta: String,
     reasoning: String,
@@ -244,6 +365,7 @@ fn build_detail(
         .collect();
 
     DecisionDetail {
+        id: d.id.to_string(),
         task: d.task.clone(),
         meta: format!("{} · {} · unreviewed", agent_label(d), local(&d.timestamp)),
         reasoning: d.reasoning.clone(),
@@ -345,9 +467,17 @@ fn files_label(decision: &Decision) -> String {
 /// Root view: the story inbox (left) and the selected decision's detail (right).
 struct ConcedeRoot {
     title: SharedString,
+    /// The repository root, kept so reviews can reopen the log and reload.
+    root: PathBuf,
     data: AppData,
     /// Flat index of the selected decision across all sessions.
     selected: usize,
+    /// Which pane the keyboard drives.
+    focus_area: FocusArea,
+    /// Whether the vim keymap is active (for the header hint).
+    vim: bool,
+    focus: FocusHandle,
+    focused_once: bool,
     list_scroll: ScrollHandle,
     detail_scroll: ScrollHandle,
     /// One per file of the selected decision (for horizontal code scrolling).
@@ -360,24 +490,19 @@ struct ConcedeRoot {
 }
 
 impl ConcedeRoot {
-    fn new(data: AppData) -> Self {
-        // A stable pool of code scroll handles, one per file slot, sized to the
-        // decision with the most files. Reused across selections (never recreated)
-        // so GPUI keeps each slot's measured geometry — recreating a handle under
-        // the same element id loses it, which breaks the horizontal scrollbar.
-        let max_files = data
-            .details
-            .iter()
-            .map(|d| d.files.len())
-            .max()
-            .unwrap_or(0);
+    fn new(root: PathBuf, data: AppData, vim: bool, cx: &mut Context<Self>) -> Self {
         Self {
             title: PRODUCT_NAME.into(),
+            root,
+            code_scrolls: code_scroll_pool(&data),
             data,
             selected: 0,
+            focus_area: FocusArea::List,
+            vim,
+            focus: cx.focus_handle(),
+            focused_once: false,
             list_scroll: ScrollHandle::new(),
             detail_scroll: ScrollHandle::new(),
-            code_scrolls: (0..max_files).map(|_| ScrollHandle::new()).collect(),
             drag: None,
             primed: false,
         }
@@ -386,7 +511,13 @@ impl ConcedeRoot {
     /// Reset the per-file scroll handles and the detail scroll when the selection
     /// changes, so the new decision starts scrolled to the top.
     fn select(&mut self, index: usize) {
+        if index >= self.data.total() {
+            return;
+        }
         self.selected = index;
+        // Keep the selected row visible in the list.
+        self.list_scroll
+            .scroll_to_item(self.list_child_index(index));
         // Reset scroll positions to the top/left, reusing the stable handles.
         self.detail_scroll.set_offset(point(px(0.0), px(0.0)));
         for handle in &self.code_scrolls {
@@ -397,16 +528,95 @@ impl ConcedeRoot {
         // horizontal scrollbars correctly.
         self.primed = false;
     }
+
+    fn select_next(&mut self) {
+        match self.focus_area {
+            FocusArea::List => self.select(self.selected.saturating_add(1)),
+            FocusArea::Detail => self.scroll_detail(60.0),
+        }
+    }
+
+    fn select_prev(&mut self) {
+        match self.focus_area {
+            FocusArea::List => self.select(self.selected.saturating_sub(1)),
+            FocusArea::Detail => self.scroll_detail(-60.0),
+        }
+    }
+
+    /// The scroll-container child index of decision `flat`, given the list is a
+    /// flat sequence of `[heading, rows…, heading, rows…]`.
+    fn list_child_index(&self, flat: usize) -> usize {
+        let mut remaining = flat;
+        let mut child = 0;
+        for session in &self.data.sessions {
+            child += 1; // the session heading
+            if remaining < session.decisions.len() {
+                return child + remaining;
+            }
+            remaining -= session.decisions.len();
+            child += session.decisions.len();
+        }
+        child
+    }
+
+    /// Scroll the detail pane by `delta` pixels (positive is down).
+    fn scroll_detail(&self, delta: f32) {
+        let max = f32::from(self.detail_scroll.max_offset().y);
+        let current = -f32::from(self.detail_scroll.offset().y);
+        let next = (current + delta).clamp(0.0, max);
+        self.detail_scroll.set_offset(point(px(0.0), px(-next)));
+    }
+
+    /// Record a review of the selected decision, then reload (it drops from the
+    /// inbox). `actor = None` lets the core use the repo's git user.
+    fn review(&mut self, status: ReviewStatus) {
+        let Some(detail) = self.data.details.get(self.selected) else {
+            return;
+        };
+        let id = detail.id.clone();
+        if let Ok(concede) = Concede::discover(&self.root) {
+            let _ = concede.review(&id, status, None, None);
+        }
+        self.data = load_app(&self.root);
+        self.code_scrolls = code_scroll_pool(&self.data);
+        self.selected = self.selected.min(self.data.total().saturating_sub(1));
+        self.focus_area = FocusArea::List;
+        self.primed = false;
+    }
+}
+
+/// A stable pool of code scroll handles, one per file slot, sized to the decision
+/// with the most files. Reused across selections (never recreated) so GPUI keeps
+/// each slot's measured geometry — recreating a handle under the same element id
+/// loses it, which breaks the horizontal scrollbar.
+fn code_scroll_pool(data: &AppData) -> Vec<ScrollHandle> {
+    let max_files = data
+        .details
+        .iter()
+        .map(|d| d.files.len())
+        .max()
+        .unwrap_or(0);
+    (0..max_files).map(|_| ScrollHandle::new()).collect()
 }
 
 impl Render for ConcedeRoot {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Draw once more after the first layout, when scroll geometry is known.
         if !self.primed {
             self.primed = true;
             cx.notify();
         }
+        // Keyboard-first: focus the root so key bindings reach it from the start.
+        if !self.focused_once {
+            self.focused_once = true;
+            window.focus(&self.focus, cx);
+        }
 
+        let hint = if self.vim {
+            "j/k move · l detail · h list · a/r review"
+        } else {
+            "↑/↓ move · enter detail · esc list · ⇧A/⇧R review"
+        };
         let header = div()
             .flex()
             .items_baseline()
@@ -425,7 +635,9 @@ impl Render for ConcedeRoot {
                 "{} unreviewed · {} unexplained",
                 self.data.total(),
                 self.data.unexplained
-            )));
+            )))
+            .child(div().flex_1())
+            .child(div().text_sm().text_color(rgb(FAINT)).child(hint));
 
         let body = if let Some(message) = &self.data.message {
             centered_message(message.clone())
@@ -443,6 +655,32 @@ impl Render for ConcedeRoot {
         };
 
         div()
+            .track_focus(&self.focus)
+            .key_context("ConcedeRoot")
+            .on_action(cx.listener(|this, _: &SelectNext, _window, cx| {
+                this.select_next();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SelectPrev, _window, cx| {
+                this.select_prev();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &FocusDetail, _window, cx| {
+                this.focus_area = FocusArea::Detail;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &FocusList, _window, cx| {
+                this.focus_area = FocusArea::List;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Approve, _window, cx| {
+                this.review(ReviewStatus::Approved);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Reject, _window, cx| {
+                this.review(ReviewStatus::Rejected);
+                cx.notify();
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -492,14 +730,24 @@ impl ConcedeRoot {
     fn inbox_list(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let selected = self.selected;
         let mut flat = 0usize;
-        let mut sessions = Vec::with_capacity(self.data.sessions.len());
+        // Flat, interleaved children (a heading, then its rows) so each decision row
+        // is a direct child of the scroll container and `scroll_to_item` can bring
+        // the selected row into view (see `list_child_index`).
+        let mut children: Vec<gpui::AnyElement> = Vec::new();
 
-        for session in &self.data.sessions {
-            let mut rows = Vec::with_capacity(session.decisions.len());
+        for (s, session) in self.data.sessions.iter().enumerate() {
+            children.push(
+                div()
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .when(s > 0, |d| d.pt_2())
+                    .child(session.heading.clone())
+                    .into_any_element(),
+            );
             for row in &session.decisions {
                 let index = flat;
                 flat += 1;
-                rows.push(
+                children.push(
                     div()
                         .id(("decision", index))
                         .flex()
@@ -532,23 +780,10 @@ impl ConcedeRoot {
                                 .text_sm()
                                 .text_color(rgb(MUTED))
                                 .child(row.files.clone()),
-                        ),
+                        )
+                        .into_any_element(),
                 );
             }
-
-            sessions.push(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(MUTED))
-                            .child(session.heading.clone()),
-                    )
-                    .child(div().flex().flex_col().gap_1().children(rows)),
-            );
         }
 
         let list = div()
@@ -556,13 +791,14 @@ impl ConcedeRoot {
             .flex()
             .flex_col()
             .size_full()
-            .gap_4()
+            .gap_2()
             .p_4()
             .overflow_y_scroll()
             .track_scroll(&self.list_scroll)
             .on_scroll(cx.listener(|_this, _ev, _window, cx| cx.notify()))
-            .children(sessions);
+            .children(children);
 
+        let focused = self.focus_area == FocusArea::List;
         div()
             .relative()
             .w(px(380.0))
@@ -571,6 +807,7 @@ impl ConcedeRoot {
             .border_color(rgb(DIVIDER))
             .child(list)
             .children(vertical_scrollbar(&self.list_scroll, cx))
+            .children(focus_strip(focused))
             .into_any_element()
     }
 
@@ -639,6 +876,7 @@ impl ConcedeRoot {
             .on_scroll(cx.listener(|_this, _ev, _window, cx| cx.notify()))
             .children(sections);
 
+        let focused = self.focus_area == FocusArea::Detail;
         div()
             .relative()
             .flex_1()
@@ -646,6 +884,7 @@ impl ConcedeRoot {
             .min_w_0()
             .child(content)
             .children(vertical_scrollbar(&self.detail_scroll, cx))
+            .children(focus_strip(focused))
             .into_any_element()
     }
 }
@@ -886,6 +1125,20 @@ fn horizontal_scrollbar(
     )
 }
 
+/// A 2px accent strip across the top of the keyboard-focused pane.
+fn focus_strip(focused: bool) -> Option<gpui::AnyElement> {
+    focused.then(|| {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(2.0))
+            .bg(rgb(ACCENT))
+            .into_any_element()
+    })
+}
+
 /// A single centred block of text (empty state / message), filling the body.
 fn centered_message(text: String) -> gpui::AnyElement {
     div()
@@ -911,8 +1164,11 @@ fn main() {
     // so this is fast; live reloading will move to a background task when we add
     // file-watching in a later step.
     let data = load_app(&root);
+    let key_config = load_key_config();
 
     gpui_platform::application().run(move |cx: &mut App| {
+        cx.bind_keys(key_bindings(&key_config));
+
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -924,8 +1180,11 @@ fn main() {
         };
         // Failing to open the main window at startup is unrecoverable, so a panic with a
         // clear message is the right outcome here.
-        cx.open_window(options, |_, cx| cx.new(|_| ConcedeRoot::new(data)))
-            .expect("failed to open the main window");
+        let vim = key_config.vim;
+        cx.open_window(options, |_, cx| {
+            cx.new(|cx| ConcedeRoot::new(root, data, vim, cx))
+        })
+        .expect("failed to open the main window");
         cx.activate(true);
     });
 }
