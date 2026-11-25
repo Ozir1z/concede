@@ -205,6 +205,13 @@
     "id": {
       "$ref": "#/$defs/DecisionId"
     },
+    "intent": {
+      "description": "The intent (change story) this decision belongs to: a short, free-text label\ngrouping decisions that serve one purpose. Absent when the change wasn't\ntagged; stories then fall back to grouping by session (ADR 0011).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "reasoning": {
       "default": "",
       "description": "Why the change was made. May be empty only for `source: hook`.",

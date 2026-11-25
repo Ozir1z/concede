@@ -31,7 +31,10 @@ pub use error::{Error, Result, ValidationError};
 pub use git::GitCli;
 pub use id::{CaptureId, DecisionId, EventId};
 pub use linemap::{MappedRange, Mapping};
-pub use log::{CaptureHit, DecisionHit, DecisionState, Inbox, Log, SessionGroup};
+pub use log::{
+    CaptureHit, DecisionHit, DecisionState, Inbox, Log, SessionGroup, Story, StoryKey, StoryReview,
+    StoryStatus,
+};
 pub use model::{
     AgentInfo, Alternative, BlobId, Capture, Change, CommitId, Decision, Event, EventKind, Hunk,
     LineRange, RepoPath, ReviewStatus, SCHEMA_VERSION, Source,

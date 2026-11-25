@@ -338,6 +338,11 @@ pub struct Decision {
     pub agent: Option<AgentInfo>,
     /// The prompt or task summary.
     pub task: String,
+    /// The intent (change story) this decision belongs to: a short, free-text label
+    /// grouping decisions that serve one purpose. Absent when the change wasn't
+    /// tagged; stories then fall back to grouping by session (ADR 0011).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
     /// Why the change was made. May be empty only for `source: hook`.
     #[serde(default)]
     pub reasoning: String,
@@ -367,6 +372,7 @@ impl Decision {
             source,
             agent: None,
             task: task.into(),
+            intent: None,
             reasoning: String::new(),
             alternatives: Vec::new(),
             allowed_by: allowed_by.into(),
@@ -384,6 +390,11 @@ impl Decision {
     /// The agent session this decision belongs to, if known.
     pub fn session(&self) -> Option<&str> {
         self.agent.as_ref().and_then(|a| a.session.as_deref())
+    }
+
+    /// The intent (change story) label this decision was tagged with, if any.
+    pub fn intent(&self) -> Option<&str> {
+        self.intent.as_deref()
     }
 }
 

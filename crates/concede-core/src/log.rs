@@ -57,6 +57,73 @@ pub struct SessionGroup<'a> {
     pub decisions: Vec<&'a Decision>,
 }
 
+/// How a change story was grouped (ADR 0011).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoryKey<'a> {
+    /// Decisions sharing a recorded `intent` label — grouped even across sessions.
+    Intent(&'a str),
+    /// No intent recorded: grouped by the agent session instead.
+    Session(&'a str),
+    /// Neither an intent nor a session.
+    Ungrouped,
+}
+
+/// The aggregate review state of a story's decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoryStatus {
+    /// Every decision is still unreviewed.
+    Unreviewed,
+    /// Some decisions reviewed, some not.
+    Mixed,
+    /// Every decision has been reviewed (approved or rejected).
+    Reviewed,
+}
+
+/// How many of a story's decisions sit in each review state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoryReview {
+    pub unreviewed: usize,
+    pub approved: usize,
+    pub rejected: usize,
+}
+
+impl StoryReview {
+    /// Total decisions counted (always ≥ 1 for a story).
+    pub fn total(&self) -> usize {
+        self.unreviewed + self.approved + self.rejected
+    }
+
+    /// The aggregate status: all-unreviewed, all-reviewed, or mixed.
+    pub fn status(&self) -> StoryStatus {
+        if self.unreviewed == 0 {
+            StoryStatus::Reviewed
+        } else if self.unreviewed == self.total() {
+            StoryStatus::Unreviewed
+        } else {
+            StoryStatus::Mixed
+        }
+    }
+}
+
+/// A change story: decisions that serve one intent, with the files they touched and
+/// their aggregate review state (ADR 0011).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Story<'a> {
+    pub key: StoryKey<'a>,
+    /// In creation order.
+    pub decisions: Vec<&'a Decision>,
+    /// Union of touched paths, sorted and deduplicated.
+    pub files: Vec<RepoPath>,
+    pub review: StoryReview,
+}
+
+impl Story<'_> {
+    /// The aggregate review status of the story.
+    pub fn status(&self) -> StoryStatus {
+        self.review.status()
+    }
+}
+
 /// What still needs a human: unreviewed decisions, and changes nobody explained.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Inbox<'a> {
@@ -253,6 +320,53 @@ impl Log {
             sessions: groups,
             unexplained: self.unclaimed_captures(),
         }
+    }
+
+    /// All decisions grouped into change stories (ADR 0011): by recorded `intent`
+    /// when present, else by session, else ungrouped. Decisions sharing an intent
+    /// group together even across sessions. Stories come out ordered by their
+    /// earliest decision (first-touch), since decisions iterate oldest first, and
+    /// decisions within a story stay in creation order.
+    pub fn stories(&self) -> Vec<Story<'_>> {
+        let mut stories: Vec<Story<'_>> = Vec::new();
+        for decision in self.decisions() {
+            let key = match (decision.intent(), decision.session()) {
+                (Some(intent), _) => StoryKey::Intent(intent),
+                (None, Some(session)) => StoryKey::Session(session),
+                (None, None) => StoryKey::Ungrouped,
+            };
+            // Index-based lookup so the (immutable) search borrow is released before
+            // a push — the first-seen order of keys gives the earliest-touch order.
+            let index = match stories.iter().position(|s| s.key == key) {
+                Some(index) => index,
+                None => {
+                    stories.push(Story {
+                        key,
+                        decisions: Vec::new(),
+                        files: Vec::new(),
+                        review: StoryReview::default(),
+                    });
+                    stories.len() - 1
+                }
+            };
+            let story = &mut stories[index];
+            story.decisions.push(decision);
+            match self.state(&decision.id).review {
+                ReviewStatus::Unreviewed => story.review.unreviewed += 1,
+                ReviewStatus::Approved => story.review.approved += 1,
+                ReviewStatus::Rejected => story.review.rejected += 1,
+            }
+        }
+
+        for story in &mut stories {
+            let files: BTreeSet<RepoPath> = story
+                .decisions
+                .iter()
+                .flat_map(|d| d.changes.iter().map(|c| c.path.clone()))
+                .collect();
+            story.files = files.into_iter().collect();
+        }
+        stories
     }
 }
 
@@ -510,5 +624,92 @@ mod tests {
         d.captures = vec![cap.id];
         let log = Log::new(vec![d], vec![], vec![cap]);
         assert!(log.claimable_captures(&[path("a")], Some("s1")).is_empty());
+    }
+
+    /// Set the intent on a decision (the test helper leaves it unset).
+    fn with_intent(mut d: Decision, intent: &str) -> Decision {
+        d.intent = Some(intent.to_owned());
+        d
+    }
+
+    #[test]
+    fn stories_group_by_intent_then_session_then_ungrouped() {
+        // Same intent in two different sessions → one story; a sessionful decision
+        // without intent → its own story; neither → the ungrouped story.
+        let login_a = with_intent(
+            decision(Some("s1"), vec![change("src/Login.cs", &[(1, 2)])]),
+            "login",
+        );
+        let login_b = with_intent(
+            decision(Some("s2"), vec![change("src/Auth.cs", &[(5, 1)])]),
+            "login",
+        );
+        let tidy = decision(Some("s1"), vec![change("src/Login.cs", &[(9, 1)])]);
+        let orphan = decision(None, vec![change("src/Misc.cs", &[(1, 1)])]);
+
+        // Shuffled into the log; stories() re-derives creation order internally.
+        let log = Log::new(
+            vec![
+                tidy.clone(),
+                orphan.clone(),
+                login_b.clone(),
+                login_a.clone(),
+            ],
+            vec![],
+            vec![],
+        );
+        let stories = log.stories();
+
+        assert_eq!(stories.len(), 3);
+        // Ordered by earliest-touch: login (login_a) first, then s1 (tidy), then orphan.
+        assert_eq!(stories[0].key, StoryKey::Intent("login"));
+        assert_eq!(
+            stories[0]
+                .decisions
+                .iter()
+                .map(|d| d.id)
+                .collect::<Vec<_>>(),
+            vec![login_a.id, login_b.id]
+        );
+        // Files are the de-duplicated, sorted union across the story's decisions.
+        assert_eq!(
+            stories[0].files,
+            vec![path("src/Auth.cs"), path("src/Login.cs")]
+        );
+
+        assert_eq!(stories[1].key, StoryKey::Session("s1"));
+        assert_eq!(stories[1].decisions, vec![&tidy]);
+
+        assert_eq!(stories[2].key, StoryKey::Ungrouped);
+        assert_eq!(stories[2].decisions, vec![&orphan]);
+    }
+
+    #[test]
+    fn story_status_aggregates_decision_reviews() {
+        let first = with_intent(decision(Some("s1"), vec![]), "cleanup");
+        let second = with_intent(decision(Some("s1"), vec![]), "cleanup");
+
+        // Both unreviewed → Unreviewed.
+        let log = Log::new(vec![first.clone(), second.clone()], vec![], vec![]);
+        assert_eq!(log.stories()[0].status(), StoryStatus::Unreviewed);
+
+        // One approved, one not → Mixed.
+        let approve = Event::review(first.id, "me", ReviewStatus::Approved, None);
+        let log = Log::new(
+            vec![first.clone(), second.clone()],
+            vec![approve.clone()],
+            vec![],
+        );
+        let story = &log.stories()[0];
+        assert_eq!(story.status(), StoryStatus::Mixed);
+        assert_eq!(story.review.approved, 1);
+        assert_eq!(story.review.unreviewed, 1);
+
+        // Both reviewed (one approved, one rejected) → Reviewed.
+        let reject = Event::review(second.id, "me", ReviewStatus::Rejected, None);
+        let log = Log::new(vec![first, second], vec![approve, reject], vec![]);
+        let story = &log.stories()[0];
+        assert_eq!(story.status(), StoryStatus::Reviewed);
+        assert_eq!(story.review.total(), 2);
     }
 }
